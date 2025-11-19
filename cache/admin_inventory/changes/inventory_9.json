@@ -1,0 +1,11 @@
+{
+    "inventory_id": 9,
+    "version": 7,
+    "committed": true,
+    "changed_by": "1",
+    "role": "admin",
+    "timestamp": "2025-10-29T13:49:34+01:00",
+    "unit_type": "per kilo",
+    "unit_price": 34,
+    "variants": []
+}

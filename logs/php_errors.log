@@ -1,0 +1,6 @@
+[13-Nov-2025 09:31:11 Europe/Berlin] Deleted 1 delivery(ies) for order #41 (all statuses)
+[13-Nov-2025 11:35:51 Europe/Berlin] Reversed inventory stock for variation 'Quantity:10|Size:Medium': Reduced by 33 (new qty: 957)
+[13-Nov-2025 11:54:13 Europe/Berlin] Reversed inventory stock for variation 'Brand:Generic|Size:Medium|Type:Standard': Reduced by 23 (new qty: 3711)
+[13-Nov-2025 11:54:15 Europe/Berlin] Reversed inventory stock for variation 'Brand:Generic|Size:Large|Type:Standard': Reduced by 20 (new qty: 2940)
+[13-Nov-2025 11:54:16 Europe/Berlin] Reversed inventory stock for variation 'Quantity:10|Size:Small': Reduced by 20 (new qty: 1470)
+[13-Nov-2025 12:00:13 Europe/Berlin] Reversed inventory stock for variation 'Quantity:10|Size:Medium': Reduced by 20 (new qty: 60)

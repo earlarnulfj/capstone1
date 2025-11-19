@@ -1,0 +1,9 @@
+[2025-10-26 06:43:47] admin/deliveries.php perf — orders:30 deliveries:26 orders_q:0.003s deliveries_q:0.002s mem_peak:2.0MB
+[2025-10-26 06:45:47] admin/deliveries.php perf — orders:30 deliveries:26 orders_q:0.002s deliveries_q:0.001s mem_peak:2.0MB
+[2025-10-26 06:47:02] admin/deliveries.php perf — orders:30 deliveries:26 orders_q:0.002s deliveries_q:0.001s mem_peak:2.0MB
+[2025-10-26 06:47:02] admin/deliveries.php perf — orders:30 deliveries:26 orders_q:0.002s deliveries_q:0.002s mem_peak:2.0MB
+[2025-10-26 06:48:42] admin/deliveries.php perf — orders:30 deliveries:26 orders_q:0.002s deliveries_q:0.002s mem_peak:2.0MB
+[2025-10-26 06:48:42] admin/deliveries.php perf — orders:30 deliveries:26 orders_q:0.002s deliveries_q:0.001s mem_peak:2.0MB
+[2025-10-26 08:21:28] [query_error] Failed to load notifications or stats {"error":"Call to undefined method Notification::getRecipientStats()","page":1,"limit":20,"offset":0}
+[2025-10-26 08:21:28] [query_error] Failed to load notifications or stats {"error":"Call to undefined method Notification::getRecipientStats()","page":1,"limit":20,"offset":0}
+[2025-10-26 08:21:28] [query_error] Failed to load notifications or stats {"error":"Call to undefined method Notification::getRecipientStats()","page":1,"limit":20,"offset":0}

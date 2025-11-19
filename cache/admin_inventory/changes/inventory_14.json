@@ -1,0 +1,11 @@
+{
+    "inventory_id": 14,
+    "version": 1,
+    "committed": true,
+    "changed_by": 1,
+    "role": "supplier",
+    "timestamp": "2025-10-29T16:32:46+01:00",
+    "unit_type": "per kilo",
+    "unit_price": 12,
+    "variants": []
+}

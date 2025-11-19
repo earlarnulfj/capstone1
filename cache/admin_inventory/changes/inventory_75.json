@@ -1,0 +1,60 @@
+{
+    "inventory_id": 75,
+    "version": 3,
+    "committed": true,
+    "changed_by": 1,
+    "role": "supplier",
+    "timestamp": "2025-11-01T13:48:23+01:00",
+    "unit_type": "per kilo",
+    "unit_price": 5,
+    "variants": {
+        "Kilo:1k": {
+            "unit_type": "per kilo",
+            "unit_price": 5,
+            "stock": null,
+            "last_updated": null
+        },
+        "Kilo:2k": {
+            "unit_type": "per kilo",
+            "unit_price": 10,
+            "stock": null,
+            "last_updated": null
+        },
+        "Kilo:3k": {
+            "unit_type": "per kilo",
+            "unit_price": 20,
+            "stock": null,
+            "last_updated": null
+        },
+        "Kilo:4k": {
+            "unit_type": "per kilo",
+            "unit_price": 15,
+            "stock": null,
+            "last_updated": null
+        },
+        "Size:1mm": {
+            "unit_type": "per kilo",
+            "unit_price": 5,
+            "stock": null,
+            "last_updated": null
+        },
+        "Size:2mm": {
+            "unit_type": "per kilo",
+            "unit_price": 10,
+            "stock": null,
+            "last_updated": null
+        },
+        "Size:3mm": {
+            "unit_type": "per kilo",
+            "unit_price": 15,
+            "stock": null,
+            "last_updated": null
+        },
+        "Size:4mm": {
+            "unit_type": "per kilo",
+            "unit_price": 20,
+            "stock": null,
+            "last_updated": null
+        }
+    }
+}

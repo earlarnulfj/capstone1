@@ -1,0 +1,48 @@
+{
+    "inventory_id": 72,
+    "version": 1,
+    "committed": true,
+    "changed_by": 1,
+    "role": "supplier",
+    "timestamp": "2025-10-31T16:19:22+01:00",
+    "unit_type": "per per box",
+    "unit_price": 0,
+    "variants": {
+        "Quantity:10": {
+            "unit_type": "per per box",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        },
+        "Quantity:20": {
+            "unit_type": "per per box",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        },
+        "Quantity:50": {
+            "unit_type": "per per box",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        },
+        "Size:Large": {
+            "unit_type": "per per box",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        },
+        "Size:Medium": {
+            "unit_type": "per per box",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        },
+        "Size:Small": {
+            "unit_type": "per per box",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        }
+    }
+}

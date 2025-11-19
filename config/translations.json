@@ -1,0 +1,24 @@
+{
+  "languages": ["en", "tl"],
+  "default": "en",
+  "translations": {
+    "en": {
+      "variations.applied_updates": "Applied {count} price variation update(s)",
+      "variations.sync_error_retry": "Variation sync error. Retrying...",
+      "variations.started": "Started with interval {ms}ms",
+      "variations.stopped": "Stopped",
+      "common.http_error": "HTTP {status}",
+      "common.invalid_json": "Invalid JSON response",
+      "common.feed_error": "Feed error"
+    },
+    "tl": {
+      "variations.applied_updates": "Na-apply ang {count} update ng presyo",
+      "variations.sync_error_retry": "May error sa variation sync. Subukang muli...",
+      "variations.started": "Sinimulan sa agwat na {ms}ms",
+      "variations.stopped": "Itinigil",
+      "common.http_error": "HTTP {status}",
+      "common.invalid_json": "Di-wastong JSON na tugon",
+      "common.feed_error": "Error sa feed"
+    }
+  }
+}

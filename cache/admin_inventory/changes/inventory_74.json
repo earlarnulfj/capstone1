@@ -1,0 +1,36 @@
+{
+    "inventory_id": 74,
+    "version": 1,
+    "committed": true,
+    "changed_by": 1,
+    "role": "supplier",
+    "timestamp": "2025-11-01T10:19:07+01:00",
+    "unit_type": "per piece",
+    "unit_price": 0,
+    "variants": {
+        "Type:Sand": {
+            "unit_type": "per piece",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        },
+        "Type:Cement": {
+            "unit_type": "per piece",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        },
+        "Material:Jute": {
+            "unit_type": "per piece",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        },
+        "Material:Plastic": {
+            "unit_type": "per piece",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        }
+    }
+}

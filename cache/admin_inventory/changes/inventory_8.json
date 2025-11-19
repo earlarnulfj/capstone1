@@ -1,0 +1,11 @@
+{
+    "inventory_id": 8,
+    "version": 1,
+    "committed": true,
+    "changed_by": "1",
+    "role": "admin",
+    "timestamp": "2025-10-29T13:02:35+01:00",
+    "unit_type": "per piece",
+    "unit_price": 38,
+    "variants": []
+}

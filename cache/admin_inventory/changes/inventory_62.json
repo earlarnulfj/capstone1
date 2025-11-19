@@ -1,0 +1,42 @@
+{
+    "inventory_id": 62,
+    "version": 10,
+    "committed": true,
+    "changed_by": 1,
+    "role": "supplier",
+    "timestamp": "2025-10-31T16:15:05+01:00",
+    "unit_type": "per piece",
+    "unit_price": null,
+    "variants": {
+        "Brand:ProCoat": {
+            "unit_type": "per per liter",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        },
+        "Color:Red": {
+            "unit_type": "per per liter",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        },
+        "Color:White": {
+            "unit_type": "per per liter",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        },
+        "Finish:Gloss": {
+            "unit_type": "per per liter",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        },
+        "Finish:Matte": {
+            "unit_type": "per per liter",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        }
+    }
+}

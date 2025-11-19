@@ -1,0 +1,24 @@
+{
+    "inventory_id": 73,
+    "version": 1,
+    "committed": true,
+    "changed_by": 1,
+    "role": "supplier",
+    "timestamp": "2025-10-31T16:19:45+01:00",
+    "unit_type": "per per sheet",
+    "unit_price": 0,
+    "variants": {
+        "Type:Plywood": {
+            "unit_type": "per per sheet",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        },
+        "Type:Metal": {
+            "unit_type": "per per sheet",
+            "unit_price": null,
+            "stock": null,
+            "last_updated": null
+        }
+    }
+}

@@ -1,0 +1,11 @@
+{
+    "inventory_id": 51,
+    "version": 2,
+    "committed": true,
+    "changed_by": 1,
+    "role": "supplier",
+    "timestamp": "2025-10-30T18:14:22+01:00",
+    "unit_type": "per piece",
+    "unit_price": null,
+    "variants": []
+}

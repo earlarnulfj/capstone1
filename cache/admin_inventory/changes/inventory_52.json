@@ -1,0 +1,36 @@
+{
+    "inventory_id": 52,
+    "version": 1,
+    "committed": true,
+    "changed_by": 1,
+    "role": "supplier",
+    "timestamp": "2025-10-30T19:14:05+01:00",
+    "unit_type": "per piece",
+    "unit_price": 4,
+    "variants": {
+        "Brand:Generic": {
+            "unit_type": "per piece",
+            "unit_price": 4,
+            "stock": null,
+            "last_updated": null
+        },
+        "Brand:ProTools": {
+            "unit_type": "per piece",
+            "unit_price": 4,
+            "stock": null,
+            "last_updated": null
+        },
+        "Type:Claw Hammer": {
+            "unit_type": "per piece",
+            "unit_price": 4,
+            "stock": null,
+            "last_updated": null
+        },
+        "Type:Sledge Hammer": {
+            "unit_type": "per piece",
+            "unit_price": 4,
+            "stock": null,
+            "last_updated": null
+        }
+    }
+}

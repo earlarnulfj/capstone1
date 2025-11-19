@@ -1,0 +1,36 @@
+{
+    "inventory_id": 56,
+    "version": 1,
+    "committed": true,
+    "changed_by": 1,
+    "role": "supplier",
+    "timestamp": "2025-10-31T05:21:26+01:00",
+    "unit_type": "per bag",
+    "unit_price": 2,
+    "variants": {
+        "Brand:Generic": {
+            "unit_type": "per bag",
+            "unit_price": 2,
+            "stock": null,
+            "last_updated": null
+        },
+        "Brand:Premium": {
+            "unit_type": "per bag",
+            "unit_price": 2,
+            "stock": null,
+            "last_updated": null
+        },
+        "Type:Sand": {
+            "unit_type": "per bag",
+            "unit_price": 2,
+            "stock": null,
+            "last_updated": null
+        },
+        "Type:Cement": {
+            "unit_type": "per bag",
+            "unit_price": 2,
+            "stock": null,
+            "last_updated": null
+        }
+    }
+}

@@ -1,0 +1,17 @@
+[2025-10-29T03:43:50+01:00]
+ERROR: There is no active transaction
+
+[2025-10-29T03:44:30+01:00]
+Backup table: inventory_backup_20251029_034430
+Expected clean records (pre-computed): 8
+Deleted rows: 0
+Remaining records: 8
+Verification PASSED: remaining count matches expected clean records.
+
+[2025-10-30 10:39:17] Starting dirty products cleanup
+[2025-10-30 10:39:17] Purged soft-deleted/deprecated supplier_catalog rows: 8
+[2025-10-30 10:39:17] Removed sample seeded SKUs from supplier_catalog: 8
+[2025-10-30 10:39:17] Deleted orphan product images: 5
+[2025-10-30 10:39:17] Dirty products cleanup completed
+[2025-10-30 10:40:38] Starting full products purge
+[2025-10-30 10:40:38] Full products purge completed: {"notifications":173,"deliveries":1,"payments":1,"sales_transactions":2,"inventory_variations":6,"orders":1,"alert_logs":11,"supplier_product_variations":0,"supplier_catalog":1,"inventory":11}, images=0

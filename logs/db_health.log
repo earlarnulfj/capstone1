@@ -1,0 +1,11 @@
+[2025-10-31 08:16:53] DB connection established.
+[2025-10-31 08:16:53] Server info: {"db":"inventory_db","host":"LAPTOP-OR8T8MMM","version":"10.4.32-MariaDB"}
+[2025-10-31 08:16:53] Insert executed: ok
+[2025-10-31 08:16:53] Transaction committed.
+[2025-10-31 08:16:53] Inserted row not found during monitoring.
+[2025-10-31 08:17:38] DB connection established.
+[2025-10-31 08:17:38] Server info: {"db":"inventory_db","host":"LAPTOP-OR8T8MMM","version":"10.4.32-MariaDB"}
+[2025-10-31 08:17:38] Insert executed: ok
+[2025-10-31 08:17:38] Transaction committed.
+[2025-10-31 08:17:38] Inserted row verified: {"id":40,"code":"hlth_01761895058","name":"Health Test Unit"}
+[2025-10-31 08:17:38] Soft-deleted inserted row id=40

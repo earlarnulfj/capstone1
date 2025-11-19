@@ -1,0 +1,38 @@
+-- Create table for Completed Orders Inventory section in inventory.php
+-- This table is dedicated to the "Completed Orders Inventory" section display
+-- Separate from completed_orders_inventory (used by POS systems)
+
+CREATE TABLE IF NOT EXISTS `inventory_completed_orders` (
+  `id` INT(11) NOT NULL AUTO_INCREMENT,
+  `inventory_id` INT(11) NOT NULL,
+  `sku` VARCHAR(50) DEFAULT NULL,
+  `name` VARCHAR(100) NOT NULL,
+  `description` TEXT DEFAULT NULL,
+  `variation` VARCHAR(255) DEFAULT NULL,
+  `unit_type` VARCHAR(50) DEFAULT 'per piece',
+  `total_quantity` INT(11) NOT NULL DEFAULT 0 COMMENT 'Total ordered quantity (decreases with sales)',
+  `available_quantity` INT(11) NOT NULL DEFAULT 0 COMMENT 'Available stock after sales',
+  `sold_quantity` INT(11) NOT NULL DEFAULT 0 COMMENT 'Total sold quantity',
+  `reorder_threshold` INT(11) NOT NULL DEFAULT 0,
+  `unit_price` DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+  `supplier_id` INT(11) DEFAULT NULL,
+  `supplier_name` VARCHAR(100) DEFAULT NULL,
+  `category` VARCHAR(50) DEFAULT NULL,
+  `location` VARCHAR(100) DEFAULT NULL,
+  `image_url` VARCHAR(255) DEFAULT NULL,
+  `image_path` VARCHAR(255) DEFAULT NULL,
+  `order_ids` TEXT DEFAULT NULL COMMENT 'Comma-separated list of admin_orders.id',
+  `order_count` INT(11) NOT NULL DEFAULT 0,
+  `first_order_date` DATETIME DEFAULT NULL,
+  `last_confirmation_date` DATETIME DEFAULT NULL,
+  `last_updated` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `unique_inventory_variation` (`inventory_id`, `variation`(100)),
+  KEY `idx_inventory_id` (`inventory_id`),
+  KEY `idx_sku` (`sku`),
+  KEY `idx_category` (`category`),
+  KEY `idx_supplier_id` (`supplier_id`),
+  KEY `idx_last_confirmation_date` (`last_confirmation_date`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+

@@ -1,0 +1,11 @@
+{
+    "inventory_id": 1,
+    "version": 2,
+    "committed": true,
+    "changed_by": "1",
+    "role": "admin",
+    "timestamp": "2025-10-29T09:59:18+01:00",
+    "unit_type": "per bag",
+    "unit_price": 19,
+    "variants": []
+}

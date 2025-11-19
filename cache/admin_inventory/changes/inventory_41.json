@@ -1,0 +1,30 @@
+{
+    "inventory_id": 41,
+    "version": 1,
+    "committed": true,
+    "changed_by": 1,
+    "role": "supplier",
+    "timestamp": "2025-10-30T15:31:03+01:00",
+    "unit_type": "per bag",
+    "unit_price": 50,
+    "variants": {
+        "Brand:Generic": {
+            "unit_type": "per bag",
+            "unit_price": 200,
+            "stock": null,
+            "last_updated": null
+        },
+        "Brand:Premium": {
+            "unit_type": "per bag",
+            "unit_price": 100,
+            "stock": null,
+            "last_updated": null
+        },
+        "Type:Cement": {
+            "unit_type": "per bag",
+            "unit_price": 50,
+            "stock": null,
+            "last_updated": null
+        }
+    }
+}

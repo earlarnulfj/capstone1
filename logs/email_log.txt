@@ -1,0 +1,156 @@
+2025-10-18 10:33:56 | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Verification Code | Code: 282118
+2025-10-18 10:36:49 | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Verification Code | Code: 175024
+2025-10-18 10:37:36 | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Verification Code | Code: 321874
+2025-10-18 10:43:26 | FAIL | driver=mail | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Verification Code | 
+2025-10-18 10:43:26 | FAIL | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Verification Code | Code: 201501
+2025-10-18 11:09:13 | FAIL | driver=mail | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Verification Code | 
+2025-10-18 11:09:13 | FAIL | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Verification Code | Code: 757384
+2025-10-18 11:13:59 | FAIL | driver=mail | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Verification Code | 
+2025-10-18 11:13:59 | FAIL | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Verification Code | Code: 524106
+2025-10-18 11:34:08 | FAIL | driver=mail | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | 
+2025-10-18 11:34:08 | FAIL | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | Code: 408504
+2025-10-18 11:34:14 | FAIL | driver=mail | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | 
+2025-10-18 11:34:14 | FAIL | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | Code: 606335
+2025-10-18 11:45:49 | FAIL | driver=mail | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | 
+2025-10-18 11:45:49 | FAIL | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | Code: 454951
+2025-10-18 11:50:38 | FAIL | driver=mail | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | 
+2025-10-18 11:50:38 | FAIL | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | Code: 257755
+2025-10-18 12:07:56 | FAIL | driver=phpmailer | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | phpmailer_missing
+2025-10-18 12:07:56 | FAIL | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | Code: 172550
+2025-10-18 12:11:04 | FAIL | driver=smtp | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | auth_failed
+2025-10-18 12:11:04 | FAIL | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | Code: 297739
+2025-10-18 12:17:30 | FAIL | driver=smtp | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | auth_failed
+2025-10-18 12:17:30 | FAIL | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | Code: 643497
+2025-10-18 12:17:32 | FAIL | driver=smtp | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | auth_failed
+2025-10-18 12:17:32 | FAIL | To: vpvillanueva.chmsu@gmail.com | Subject: Password Reset Instructions | Code: 230735
+[2025-10-21T11:49:14+02:00] To: vpvillanueva.chmsu@gmail.com | Code: 687046 | Token: eb6d71e1b53682b7ccdb58ebb1af32c7e30375a352ad33e3dc1ec01ceac96048
+2025-10-21 12:20:17 | to=vpvillanueva.chmsu@gmail.com | subject=Password Reset Code | code=482398
+2025-10-21 12:21:03 | to=vpvillanueva.chmsu@gmail.com | subject=Password Reset Code | code=520399
+2025-10-21 12:24:27 | to=vpvillanueva.chmsu@gmail.com | subject=Password Reset Code | code=790070 | error=SMTP Error: Could not authenticate.
+2025-10-21 12:27:01 | mode=error | to=vpvillanueva.chmsu@gmail.com | subject=Password Reset Code | code=179988 | error=SMTP Error: Could not authenticate.
+2025-10-21 12:28:26 | mode=error | to=vpvillanueva.chmsu@gmail.com | subject=Password Reset Code | code=858807 | error=SMTP Error: Could not authenticate.
+2025-10-21 12:32:03 | mode=error | to=vpvillanueva.chmsu@gmail.com | subject=Reset Link | code=681738 | error=SMTP Error: Could not authenticate.
+2025-10-21 12:36:11 | mode=error | to=vpvillanueva.chmsu@gmail.com | subject=Reset Link | code=746354 | error=SMTP Error: Could not authenticate.
+2025-10-21 12:49:48 | mode=error | to=vpvillanueva.chmsu@gmail.com | subject=Reset Link | code=763788 | error=SMTP Error: Could not authenticate.
+2025-10-21 17:34:34 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-21 17:37:24 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 220 smtp.gmail.com ESMTP d9443c01a7336-29246fcc83esm113201575ad.38 - gsmtp
+
+2025-10-21 17:37:24 | debug | to=vpvillanueva.chmsu@gmail.com | CLIENT -> SERVER: EHLO localhost
+
+2025-10-21 17:37:24 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 250-smtp.gmail.com at your service, [2001:fd8:c54f:4d00:4110:96ed:85a1:701c]
+250-SIZE 35882577
+250-8BITMIME
+250-STARTTLS
+250-ENHANCEDSTATUSCODES
+250-PIPELINING
+250-CHUNKING
+250 SMTPUTF8
+
+2025-10-21 17:37:24 | debug | to=vpvillanueva.chmsu@gmail.com | CLIENT -> SERVER: STARTTLS
+
+2025-10-21 17:37:24 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 220 2.0.0 Ready to start TLS
+
+2025-10-21 17:37:24 | debug | to=vpvillanueva.chmsu@gmail.com | CLIENT -> SERVER: EHLO localhost
+
+2025-10-21 17:37:25 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 250-smtp.gmail.com at your service, [2001:fd8:c54f:4d00:4110:96ed:85a1:701c]
+250-SIZE 35882577
+250-8BITMIME
+250-AUTH LOGIN PLAIN XOAUTH2 PLAIN-CLIENTTOKEN OAUTHBEARER XOAUTH
+250-ENHANCEDSTATUSCODES
+250-PIPELINING
+250-CHUNKING
+250 SMTPUTF8
+
+2025-10-21 17:37:25 | debug | to=vpvillanueva.chmsu@gmail.com | CLIENT -> SERVER: AUTH LOGIN
+
+2025-10-21 17:37:25 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 334 VXNlcm5hbWU6
+
+2025-10-21 17:37:25 | debug | to=vpvillanueva.chmsu@gmail.com | CLIENT -> SERVER: [credentials hidden]
+2025-10-21 17:37:25 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 334 UGFzc3dvcmQ6
+
+2025-10-21 17:37:25 | debug | to=vpvillanueva.chmsu@gmail.com | CLIENT -> SERVER: [credentials hidden]
+2025-10-21 17:37:25 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 535-5.7.8 Username and Password not accepted. For more information, go to
+535 5.7.8  https://support.google.com/mail/?p=BadCredentials d9443c01a7336-29246fcc83esm113201575ad.38 - gsmtp
+
+2025-10-21 17:37:25 | debug | to=vpvillanueva.chmsu@gmail.com | SMTP ERROR: Password command failed: 535-5.7.8 Username and Password not accepted. For more information, go to
+535 5.7.8  https://support.google.com/mail/?p=BadCredentials d9443c01a7336-29246fcc83esm113201575ad.38 - gsmtp
+
+2025-10-21 17:37:25 | debug | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-21 17:37:25 | debug | to=vpvillanueva.chmsu@gmail.com | CLIENT -> SERVER: QUIT
+
+2025-10-21 17:37:25 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 221 2.0.0 closing connection d9443c01a7336-29246fcc83esm113201575ad.38 - gsmtp
+
+2025-10-21 17:37:25 | debug | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-21 17:37:25 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-21 17:56:21 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 220 smtp.gmail.com ESMTP 98e67ed59e1d1-33d5df5c142sm11373581a91.14 - gsmtp
+
+2025-10-21 17:56:21 | debug | to=vpvillanueva.chmsu@gmail.com | CLIENT -> SERVER: EHLO localhost
+
+2025-10-21 17:56:21 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 250-smtp.gmail.com at your service, [2001:fd8:c54f:4d00:4110:96ed:85a1:701c]
+250-SIZE 35882577
+250-8BITMIME
+250-STARTTLS
+250-ENHANCEDSTATUSCODES
+250-PIPELINING
+250-CHUNKING
+250 SMTPUTF8
+
+2025-10-21 17:56:21 | debug | to=vpvillanueva.chmsu@gmail.com | CLIENT -> SERVER: STARTTLS
+
+2025-10-21 17:56:22 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 220 2.0.0 Ready to start TLS
+
+2025-10-21 17:56:22 | debug | to=vpvillanueva.chmsu@gmail.com | CLIENT -> SERVER: EHLO localhost
+
+2025-10-21 17:56:22 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 250-smtp.gmail.com at your service, [2001:fd8:c54f:4d00:4110:96ed:85a1:701c]
+250-SIZE 35882577
+250-8BITMIME
+250-AUTH LOGIN PLAIN XOAUTH2 PLAIN-CLIENTTOKEN OAUTHBEARER XOAUTH
+250-ENHANCEDSTATUSCODES
+250-PIPELINING
+250-CHUNKING
+250 SMTPUTF8
+
+2025-10-21 17:56:22 | debug | to=vpvillanueva.chmsu@gmail.com | CLIENT -> SERVER: AUTH LOGIN
+
+2025-10-21 17:56:22 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 334 VXNlcm5hbWU6
+
+2025-10-21 17:56:22 | debug | to=vpvillanueva.chmsu@gmail.com | CLIENT -> SERVER: [credentials hidden]
+2025-10-21 17:56:22 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 334 UGFzc3dvcmQ6
+
+2025-10-21 17:56:22 | debug | to=vpvillanueva.chmsu@gmail.com | CLIENT -> SERVER: [credentials hidden]
+2025-10-21 17:56:23 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 535-5.7.8 Username and Password not accepted. For more information, go to
+535 5.7.8  https://support.google.com/mail/?p=BadCredentials 98e67ed59e1d1-33d5df5c142sm11373581a91.14 - gsmtp
+
+2025-10-21 17:56:23 | debug | to=vpvillanueva.chmsu@gmail.com | SMTP ERROR: Password command failed: 535-5.7.8 Username and Password not accepted. For more information, go to
+535 5.7.8  https://support.google.com/mail/?p=BadCredentials 98e67ed59e1d1-33d5df5c142sm11373581a91.14 - gsmtp
+
+2025-10-21 17:56:23 | debug | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-21 17:56:23 | debug | to=vpvillanueva.chmsu@gmail.com | CLIENT -> SERVER: QUIT
+
+2025-10-21 17:56:23 | debug | to=vpvillanueva.chmsu@gmail.com | SERVER -> CLIENT: 221 2.0.0 closing connection 98e67ed59e1d1-33d5df5c142sm11373581a91.14 - gsmtp
+
+2025-10-21 17:56:23 | debug | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-21 17:56:23 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-21 17:58:05 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-21 17:59:55 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-21 18:01:42 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-21 18:02:17 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-21 18:04:17 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-29 05:07:28 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-29 05:08:53 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-29 05:15:25 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-29 05:15:33 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-29 05:29:43 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not authenticate.
+2025-10-29 05:31:23 | success | to=vpvillanueva.chmsu@gmail.com | sent
+2025-10-29 06:01:10 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not connect to SMTP host. Failed to connect to server SMTP server error: Failed to connect to server Additional SMTP info: php_network_getaddresses: getaddrinfo failed: No such host is known. 
+2025-10-29 06:02:01 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not connect to SMTP host. STARTTLS command failed SMTP server error: Called QUIT without being connected
+2025-10-29 06:02:29 | error | to=vpvillanueva.chmsu@gmail.com | SMTP Error: Could not connect to SMTP host. Failed to connect to server SMTP server error: Failed to connect to server SMTP code: 10060 Additional SMTP info: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond
+2025-10-29 08:46:22 | success | to=vpvillanueva.chmsu@gmail.com | sent
+2025-10-29 08:47:45 | success | to=vpvillanueva.chmsu@gmail.com | sent
+2025-10-29 08:48:37 | success | to=vpvillanueva.chmsu@gmail.com | sent
+2025-10-29 08:50:17 | success | to=vpvillanueva.chmsu@gmail.com | sent
+2025-10-29 09:27:55 | success | to=earlarnulfj@gmail.com | sent
+2025-10-31 16:07:22 | success | to=vpvillanueva.chmsu@gmail.com | sent
+2025-11-02 15:57:28 | success | to=vpvillanueva.chmsu@gmail.com | sent
+2025-11-13 11:52:09 | success | to=vpvillanueva.chmsu@gmail.com | sent
+2025-11-13 11:52:13 | success | to=vpvillanueva.chmsu@gmail.com | sent

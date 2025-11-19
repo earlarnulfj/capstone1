@@ -1,0 +1,482 @@
+body {
+  font-size: .875rem;
+}
+
+.feather {
+  width: 16px;
+  height: 16px;
+  vertical-align: text-bottom;
+}
+
+/*
+ * Sidebar
+ */
+
+.sidebar {
+  position: fixed;
+  top: 48px; /* Fixed header height */
+  bottom: 0;
+  left: 0;
+  z-index: 100; /* Behind the navbar */
+  padding: 0; /* Remove top padding since we set top position */
+  box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.1);
+}
+
+@media (max-width: 767.98px) {
+  .sidebar {
+    top: 48px; /* Keep consistent with fixed header height */
+  }
+}
+
+.sidebar-sticky {
+  position: relative;
+  top: 0;
+  height: calc(100vh - 48px);
+  padding-top: .5rem;
+  overflow-x: hidden;
+  overflow-y: auto; /* Scrollable contents if viewport is shorter than content. */
+}
+
+/* Main content area positioning */
+main.col-md-9, main.col-lg-10 {
+  margin-top: 48px; /* Account for fixed header */
+  min-height: calc(100vh - 48px);
+}
+
+/* Container stability */
+.container-fluid {
+  padding: 0;
+  margin: 0;
+  width: 100%;
+  max-width: 100%;
+}
+
+.container-fluid .row {
+  margin: 0;
+  width: 100%;
+}
+
+/* Prevent any layout shifts */
+body {
+  overflow-x: hidden;
+  position: relative;
+}
+
+/* Ensure header stays fixed and consistent */
+header.navbar {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  z-index: 1030 !important;
+  width: 100% !important;
+}
+
+/* Global layering fixes for modals and dropdowns */
+/* Ensure modals and their backdrops sit above any fixed headers/sidebars */
+.modal { z-index: 2000 !important; }
+.modal-backdrop { z-index: 1990 !important; }
+
+/* Ensure dropdown menus appear above content, and highest inside modals */
+.dropdown-menu { z-index: 1060 !important; }
+.modal .dropdown-menu { z-index: 2050 !important; }
+
+/* Backdrop should intercept clicks to prevent interacting with underlying content */
+.modal-open .modal-backdrop { pointer-events: auto !important; }
+.modal .modal-content { pointer-events: auto !important; }
+
+.sidebar .nav-link {
+  font-weight: 500;
+  color: #333;
+  display: flex !important;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+
+.sidebar .nav-link .feather {
+  margin-right: 4px;
+  color: #727272;
+}
+
+.sidebar .nav-link.active {
+  color: #2470dc;
+  background-color: rgba(36, 112, 220, 0.1);
+}
+
+.sidebar .nav-link:hover {
+  color: #2470dc;
+  background-color: rgba(36, 112, 220, 0.05);
+  text-decoration: none;
+}
+
+.sidebar .nav-link:hover .feather,
+.sidebar .nav-link.active .feather {
+  color: inherit;
+}
+
+/* Ensure badges in sidebar don't affect layout */
+.sidebar .nav-link .badge {
+  margin-left: auto;
+  font-size: 0.75rem;
+}
+
+/* Prevent any layout shifts during navigation */
+.sidebar .nav-item {
+  width: 100%;
+}
+
+.sidebar .nav-link i {
+  width: 16px;
+  text-align: center;
+  margin-right: 0.5rem;
+}
+
+.sidebar-heading {
+  font-size: .75rem;
+  text-transform: uppercase;
+}
+
+/*
+ * Navbar
+ */
+
+.navbar {
+  height: 48px !important;
+  min-height: 48px !important;
+  max-height: 48px !important;
+}
+
+.navbar-brand {
+  padding-top: .75rem;
+  padding-bottom: .75rem;
+  font-size: 1rem;
+  background-color: rgba(0, 0, 0, 0.25);
+  box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.25);
+  height: 48px;
+  display: flex;
+  align-items: center;
+}
+
+.navbar .navbar-toggler {
+  top: .25rem;
+  right: 1rem;
+}
+
+.navbar .navbar-nav {
+  height: 48px;
+  display: flex;
+  align-items: center;
+}
+
+.navbar .nav-link {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  padding: 0 1rem;
+}
+
+.navbar .form-control {
+  padding: .75rem 1rem;
+  border-width: 0;
+  border-radius: 0;
+}
+
+.form-control-dark {
+  color: #fff;
+  background-color: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.form-control-dark:focus {
+  border-color: transparent;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.25);
+}
+
+/* Custom styles */
+.card {
+  box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+  margin-bottom: 1.5rem;
+}
+
+.card-header {
+  background-color: rgba(0, 0, 0, 0.03);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.125);
+  padding: 0.75rem 1.25rem;
+}
+
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.table-responsive {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.bg-gradient-primary {
+  background: linear-gradient(180deg, #4e73df 10%, #224abe 100%);
+}
+
+.bg-gradient-success {
+  background: linear-gradient(180deg, #1cc88a 10%, #13855c 100%);
+}
+
+.bg-gradient-info {
+  background: linear-gradient(180deg, #36b9cc 10%, #258391 100%);
+}
+
+.bg-gradient-warning {
+  background: linear-gradient(180deg, #f6c23e 10%, #dda20a 100%);
+}
+
+.text-xs {
+  font-size: .7rem;
+}
+
+.text-gray-800 {
+  color: #5a5c69 !important;
+}
+
+.border-left-primary {
+  border-left: .25rem solid #4e73df !important;
+}
+
+.border-left-success {
+  border-left: .25rem solid #1cc88a !important;
+}
+
+.border-left-info {
+  border-left: .25rem solid #36b9cc !important;
+}
+
+.border-left-warning {
+  border-left: .25rem solid #f6c23e !important;
+}
+
+.border-left-danger {
+  border-left: .25rem solid #e74a3b !important;
+}
+
+/* Login page */
+.login-page {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #f8f9fc;
+}
+
+.login-form {
+  max-width: 400px;
+  width: 100%;
+  padding: 2rem;
+  background-color: #fff;
+  border-radius: 0.5rem;
+  box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+}
+
+/* Dashboard cards */
+.dashboard-card {
+  border-radius: 0.5rem;
+  box-shadow: 0 0.15rem 1.75rem rgba(0, 0, 0, 0.15);
+  margin-bottom: 1.5rem;
+}
+
+.dashboard-card .card-icon {
+  font-size: 2rem;
+  color: #fff;
+}
+
+/* POS styles */
+.product-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.product-card {
+  border: 1px solid #e3e6f0;
+  border-radius: 0.35rem;
+  transition: all 0.2s;
+}
+
+.product-card:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+}
+
+.cart-container {
+  height: calc(100vh - 200px);
+  display: flex;
+  flex-direction: column;
+}
+
+.cart-items {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.cart-footer {
+  padding: 1rem;
+  border-top: 1px solid #e3e6f0;
+  background-color: #f8f9fc;
+}
+
+/* --- Shopee-like Variation Chips --- */
+.variations-container {
+  --shopee-primary: #ee4d2d;
+  --chip-border: #e3e6f0;
+}
+
+.variation-group {
+  margin-bottom: 0.5rem;
+}
+
+.variation-group-label {
+  font-size: 0.85rem;
+}
+
+.variant-option {
+  border: 1px solid var(--chip-border);
+  border-radius: 999px;
+  padding: 0.25rem 0.6rem;
+  line-height: 1.2;
+  transition: all 0.15s ease-in-out;
+  background-color: #fff;
+}
+
+.variant-option .variation-thumb {
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+.variant-option:hover {
+  border-color: var(--shopee-primary);
+  box-shadow: 0 0 0 2px rgba(238, 77, 45, 0.15);
+}
+
+.variant-option.selected,
+.variant-option.btn-primary {
+  color: #fff;
+  background-color: var(--shopee-primary);
+  border-color: var(--shopee-primary);
+}
+
+.variant-option.disabled,
+.variant-option[aria-disabled="true"],
+.variant-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.variation-status {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+@media (max-width: 576px) {
+  .variation-options .variant-option {
+    margin-bottom: 0.25rem;
+  }
+}
+
+/* --- Supplier Product Forms (Add/Edit) --- */
+.supplier-form .form-label {
+  font-weight: 600;
+}
+.supplier-form .form-control,
+.supplier-form .form-select,
+.supplier-form textarea {
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.35rem;
+  min-height: 2.375rem;
+}
+.supplier-form .row.g-2 {
+  --bs-gutter-x: 0.5rem;
+  --bs-gutter-y: 0.5rem;
+}
+.supplier-form .mb-3 {
+  margin-bottom: 1rem !important;
+}
+.supplier-form-section {
+  padding: 0.75rem 0;
+  margin-bottom: 0.5rem;
+  border-top: 1px dashed #e3e6f0;
+}
+.supplier-form .alert-info {
+  border-radius: 0.35rem;
+}
+
+/* Consistent error states */
+.supplier-form .form-control.is-invalid,
+.supplier-form .form-select.is-invalid,
+.supplier-form textarea.is-invalid {
+  border-color: #dc3545;
+  box-shadow: 0 0 0 0.25rem rgba(220, 53, 69, 0.15);
+}
+.supplier-form .invalid-feedback {
+  font-size: 0.85rem;
+}
+
+/* Action buttons consistency */
+.btn-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2rem;
+  padding: 0.25rem 0.6rem;
+}
+.btn-action i {
+  margin-right: 0.25rem;
+}
+.btn-view {
+  /* Keep outline-info palette but unify states */
+}
+.btn-view:focus-visible,
+.btn-action:focus-visible {
+  outline: 2px solid #2470dc;
+  outline-offset: 2px;
+}
+.btn-action:hover {
+  filter: brightness(0.98);
+}
+
+/* Alignment within button groups */
+.btn-group .btn-action {
+  line-height: 1.25;
+}
+
+/* Mobile touch target requirements */
+@media (max-width: 576px) {
+  .btn-action {
+    min-height: 2.5rem;
+    min-width: 2.5rem;
+  }
+}
+
+/* Modal visual coherence */
+.modal .modal-content {
+  border-radius: 0.35rem;
+  box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+}
+
+/* Accessible status region */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
