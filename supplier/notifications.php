@@ -157,36 +157,13 @@ function sendEmailNotificationToSupplier(PDO $pdo, int $supplier_id, string $sub
 
 function getNewAdminOrdersForSupplier(PDO $pdo, int $supplier_id, ?string $since): array {
     $since = $since ?: date('Y-m-d H:i:s', strtotime('-24 hours'));
-    
-    // Check if admin_orders table exists
-    $tableExists = false;
-    try {
-        $checkTable = $pdo->query("SHOW TABLES LIKE 'admin_orders'");
-        $tableExists = $checkTable->rowCount() > 0;
-    } catch (Exception $e) {
-        error_log("Error checking admin_orders table: " . $e->getMessage());
-    }
-    
-    // Primary: Check admin_orders table (where admin orders are actually stored)
-    if ($tableExists) {
-        $sql = "SELECT ao.id AS order_id, ao.inventory_id, ao.quantity, ao.order_date, ao.user_id,
-                       u.username AS admin_username, i.name AS item_name, ao.variation, ao.unit_type
-                FROM admin_orders ao
-                INNER JOIN users u ON u.id = ao.user_id AND u.role = 'management'
-                LEFT JOIN inventory i ON i.id = ao.inventory_id
-                WHERE ao.supplier_id = :sid AND ao.order_date >= :since
-                ORDER BY ao.order_date DESC LIMIT 200";
-    } else {
-        // Fallback: Check orders table (legacy support)
-        $sql = "SELECT o.id AS order_id, o.inventory_id, o.quantity, o.order_date, o.user_id,
-                       u.username AS admin_username, i.name AS item_name, o.variation, o.unit_type
-                FROM orders o
-                INNER JOIN users u ON u.id = o.user_id AND u.role = 'management'
-                LEFT JOIN inventory i ON i.id = o.inventory_id
-                WHERE o.supplier_id = :sid AND o.order_date >= :since
-                ORDER BY o.order_date DESC LIMIT 200";
-    }
-    
+    $sql = "SELECT o.id AS order_id, o.inventory_id, o.quantity, o.order_date, o.user_id,
+                   u.username AS admin_username, i.name AS item_name
+            FROM orders o
+            INNER JOIN users u ON u.id = o.user_id AND u.role = 'management'
+            LEFT JOIN inventory i ON i.id = o.inventory_id
+            WHERE o.supplier_id = :sid AND o.order_date >= :since
+            ORDER BY o.order_date DESC LIMIT 200";
     $stmt = $pdo->prepare($sql);
     $stmt->bindValue(':sid', $supplier_id, PDO::PARAM_INT);
     $stmt->bindValue(':since', $since);
@@ -211,34 +188,12 @@ function notificationExistsForOrder(PDO $pdo, int $supplier_id, int $order_id): 
 
 function notificationWasDeletedForOrder(PDO $pdo, int $supplier_id, int $order_id): bool {
     // Check if notification was explicitly deleted by user
-    // Check if order is older than when sync should run (only sync recent orders)
-    // Check both admin_orders and orders tables
-    $order = null;
-    
-    // First try admin_orders table
-    try {
-        $checkTable = $pdo->query("SHOW TABLES LIKE 'admin_orders'");
-        if ($checkTable->rowCount() > 0) {
-            $stmt = $pdo->prepare("SELECT order_date FROM admin_orders WHERE id = :oid LIMIT 1");
-            $stmt->bindValue(':oid', $order_id, PDO::PARAM_INT);
-            $stmt->execute();
-            $order = $stmt->fetch(PDO::FETCH_ASSOC);
-        }
-    } catch (Exception $e) {
-        // Fall through to orders table
-    }
-    
-    // Fallback to orders table if not found in admin_orders
-    if (!$order) {
-        try {
-            $stmt = $pdo->prepare("SELECT order_date FROM orders WHERE id = :oid LIMIT 1");
-            $stmt->bindValue(':oid', $order_id, PDO::PARAM_INT);
-            $stmt->execute();
-            $order = $stmt->fetch(PDO::FETCH_ASSOC);
-        } catch (Exception $e) {
-            error_log("Error checking order date: " . $e->getMessage());
-        }
-    }
+    // We'll use a session or database table to track deleted notifications
+    // For now, check if order is older than when sync should run (only sync recent orders)
+    $stmt = $pdo->prepare("SELECT order_date FROM orders WHERE id = :oid LIMIT 1");
+    $stmt->bindValue(':oid', $order_id, PDO::PARAM_INT);
+    $stmt->execute();
+    $order = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if ($order && isset($order['order_date'])) {
         $orderDate = strtotime($order['order_date']);
@@ -255,39 +210,18 @@ function notificationWasDeletedForOrder(PDO $pdo, int $supplier_id, int $order_i
 function createSupplierOrderNotificationFromAdmin(Notification $notification, PDO $pdo, int $supplier_id, array $orderRow): array {
     $orderId = (int)($orderRow['order_id'] ?? 0);
     $qty     = (int)($orderRow['quantity'] ?? 0);
-    $item    = trim((string)($orderRow['item_name'] ?? 'Item'));
+    $item    = trim((string)($orderRow['item_name'] ?? ''));
     $ts      = (string)($orderRow['order_date'] ?? date('Y-m-d H:i:s'));
     $admin   = trim((string)($orderRow['admin_username'] ?? 'Admin'));
-    $variation = isset($orderRow['variation']) ? trim((string)$orderRow['variation']) : '';
-    $unitType = isset($orderRow['unit_type']) ? trim((string)$orderRow['unit_type']) : '';
-    
-    // Build item description with variation and unit type if available
-    $itemDescription = $item;
-    if (!empty($variation) || !empty($unitType)) {
-        $parts = [];
-        if (!empty($unitType)) $parts[] = $unitType;
-        if (!empty($variation)) $parts[] = $variation;
-        $itemDescription = $item . ' (' . implode(' / ', $parts) . ')';
-    }
-    
     $notification->type = 'order_confirmation';
     $notification->channel = 'system';
     $notification->recipient_type = 'supplier';
     $notification->recipient_id = (int)$supplier_id;
     $notification->order_id = $orderId;
     $notification->alert_id = null;
-    $notification->message = "Admin {$admin} placed order #{$orderId}: {$qty} x {$itemDescription} on " . date('M d, Y H:i', strtotime($ts));
+    $notification->message = "Admin {$admin} placed order #{$orderId}: {$qty} x {$item} on {$ts}";
     $notification->status = 'sent';
     $created = $notification->createWithDuplicateCheck(true, 5);
-    
-    // Log creation attempt
-    logNotificationEvent('supplier_order_notification_created', [
-        'supplier_id' => $supplier_id,
-        'order_id' => $orderId,
-        'created' => (bool)$created,
-        'message' => $notification->message
-    ]);
-    
     // Optional email
     $emailOk = false;
     if (isEmailConfigured()) {
@@ -305,24 +239,11 @@ function syncAdminOrdersForSupplier(PDO $pdo, int $supplier_id, ?string $since =
         $since = $since ?: date('Y-m-d H:i:s', strtotime('-24 hours'));
         $rows = getNewAdminOrdersForSupplier($pdo, $supplier_id, $since);
         
-        // Log sync attempt
-        logNotificationEvent('supplier_sync_started', [
-            'supplier_id' => $supplier_id,
-            'since' => $since,
-            'orders_found' => count($rows)
-        ]);
-        
-        if (empty($rows)) {
-            // No orders found - this is normal, not an error
-            return ['created' => 0, 'emails' => 0, 'errors' => []];
-        }
-        
         foreach ($rows as $r) {
             $oid = (int)$r['order_id'];
             
             // Skip if notification already exists
             if (notificationExistsForOrder($pdo, $supplier_id, $oid)) {
-                logNotificationEvent('supplier_sync_skipped_exists', ['supplier_id' => $supplier_id, 'order_id' => $oid]);
                 continue;
             }
             
@@ -336,33 +257,16 @@ function syncAdminOrdersForSupplier(PDO $pdo, int $supplier_id, ?string $since =
             $orderDate = strtotime($r['order_date'] ?? date('Y-m-d H:i:s'));
             $hoursSinceOrder = (time() - $orderDate) / 3600;
             if ($hoursSinceOrder > 24) {
-                logNotificationEvent('supplier_sync_skipped_old', ['supplier_id' => $supplier_id, 'order_id' => $oid, 'hours_old' => $hoursSinceOrder]);
                 continue; // Skip old orders
             }
             
-            // Create notification for this order
             $res = createSupplierOrderNotificationFromAdmin(new Notification($pdo), $pdo, $supplier_id, $r);
-            if ($res['db_created']) { 
-                $created++; 
-                error_log("Success: Created notification for supplier {$supplier_id}, order #{$oid}");
-            } else {
-                error_log("Warning: Failed to create notification for supplier {$supplier_id}, order #{$oid} - duplicate or error");
-            }
+            if ($res['db_created']) { $created++; }
             if ($res['email_sent']) { $emails++; }
             logNotificationEvent('supplier_sync_admin_order_created', ['supplier_id' => $supplier_id, 'order_id' => $oid, 'result' => $res]);
         }
-        
-        // Log sync completion
-        logNotificationEvent('supplier_sync_completed', [
-            'supplier_id' => $supplier_id,
-            'created' => $created,
-            'emails' => $emails,
-            'total_orders_checked' => count($rows)
-        ]);
-        
     } catch (Throwable $e) {
         $errors[] = $e->getMessage();
-        error_log("ERROR: Supplier notification sync failed for supplier {$supplier_id}: " . $e->getMessage());
         logNotificationEvent('supplier_sync_admin_orders_error', ['supplier_id' => $supplier_id, 'error' => $e->getMessage()]);
         if (!$silent) throw $e;
     }
@@ -374,9 +278,8 @@ $acceptJson = strpos($_SERVER['HTTP_ACCEPT'] ?? '', 'application/json') !== fals
 $isApi = isset($_GET['api']) || isset($_POST['api']) || $acceptJson;
 if ($isApi) {
     $action = $_POST['action'] ?? $_GET['action'] ?? 'list';
-    // CSRF for state-changing actions (sync_admin_orders is safe for GET as it has duplicate prevention)
-    $requiresCsrf = in_array($action, ['create_notification','update_status','delete_notification','delete_multiple','mark_read','mark_all_read','delete_expired'], true);
-    // sync_admin_orders via GET doesn't need CSRF (read-only with duplicate prevention)
+    // Optional CSRF for state-changing actions
+    $requiresCsrf = in_array($action, ['create_notification','update_status','delete_notification','delete_multiple','mark_read','mark_all_read','delete_expired','sync_admin_orders'], true);
     if ($requiresCsrf) {
         $csrf = $_POST['csrf_token'] ?? $_GET['csrf_token'] ?? '';
         if (!$csrf || !hash_equals($_SESSION['csrf_token'], $csrf)) {
@@ -411,8 +314,10 @@ if ($isApi) {
                 logNotificationEvent('supplier_create_notification', ['supplier_id' => (int)$supplier_id, 'type' => $type, 'result' => $created]);
                 if ($created === false) {
                     respondJson(200, ['duplicate_prevented' => true]);
+                    break;
                 }
                 respondJson(201, ['success' => true]);
+                break;
             }
             case 'list': {
                 $filters = [];
@@ -431,6 +336,7 @@ if ($isApi) {
                     'data' => $data,
                     'pagination' => ['page' => $page, 'limit' => $limit, 'total' => $total]
                 ]);
+                break;
             }
             case 'update_status': {
                 $id = (int)($_POST['id'] ?? 0);
@@ -447,6 +353,7 @@ if ($isApi) {
                 $ok = $stmt->execute();
                 logNotificationEvent('supplier_update_status', ['supplier_id' => (int)$supplier_id, 'id' => $id, 'status' => $newStatus, 'ok' => $ok]);
                 respondJson($ok ? 200 : 500, ['success' => (bool)$ok]);
+                break;
             }
             case 'mark_read': {
                 $id = (int)($_POST['notification_id'] ?? 0);
@@ -454,60 +361,21 @@ if ($isApi) {
                 $ok = $notification->markAsRead($id);
                 logNotificationEvent('supplier_mark_read', ['supplier_id' => (int)$supplier_id, 'id' => $id, 'ok' => $ok]);
                 respondJson($ok ? 200 : 500, ['success' => (bool)$ok]);
+                break;
             }
             case 'mark_all_read': {
                 $ok = $notification->markAllAsRead('supplier', (int)$supplier_id);
                 logNotificationEvent('supplier_mark_all_read', ['supplier_id' => (int)$supplier_id, 'ok' => $ok]);
                 respondJson($ok ? 200 : 500, ['success' => (bool)$ok]);
+                break;
             }
             case 'delete_notification': {
                 $id = (int)($_POST['notification_id'] ?? 0);
-                if (!$id) {
-                    respondJson(422, ['error' => 'Invalid notification ID']);
-                }
-                
-                // Verify ownership
-                if (!ensureOwnsNotification($pdo, (int)$supplier_id, $id)) {
-                    respondJson(404, ['error' => 'Notification not found or unauthorized']);
-                }
-                
-                try {
-                    // Delete directly from database with explicit query
-                    $deleteStmt = $pdo->prepare("
-                        DELETE FROM notifications 
-                        WHERE id = :id 
-                        AND recipient_type = 'supplier' 
-                        AND recipient_id = :supplier_id
-                    ");
-                    $deleteStmt->bindValue(':id', $id, PDO::PARAM_INT);
-                    $deleteStmt->bindValue(':supplier_id', (int)$supplier_id, PDO::PARAM_INT);
-                    $deleteStmt->execute();
-                    $deleted = $deleteStmt->rowCount() > 0;
-                    
-                    if ($deleted) {
-                        logNotificationEvent('supplier_delete_notification', [
-                            'supplier_id' => (int)$supplier_id, 
-                            'id' => $id, 
-                            'ok' => true
-                        ]);
-                        respondJson(200, ['success' => true, 'deleted' => true]);
-                    } else {
-                        logNotificationEvent('supplier_delete_notification', [
-                            'supplier_id' => (int)$supplier_id, 
-                            'id' => $id, 
-                            'ok' => false,
-                            'reason' => 'No rows deleted'
-                        ]);
-                        respondJson(500, ['error' => 'Failed to delete notification']);
-                    }
-                } catch (Throwable $e) {
-                    logNotificationEvent('supplier_delete_notification_error', [
-                        'supplier_id' => (int)$supplier_id, 
-                        'id' => $id, 
-                        'error' => $e->getMessage()
-                    ]);
-                    respondJson(500, ['error' => 'Database error: ' . $e->getMessage()]);
-                }
+                if (!$id || !ensureOwnsNotification($pdo, (int)$supplier_id, $id)) { respondJson(404, ['error' => 'Notification not found']); }
+                $ok = $notification->deleteNotification($id);
+                logNotificationEvent('supplier_delete_notification', ['supplier_id' => (int)$supplier_id, 'id' => $id, 'ok' => $ok]);
+                respondJson($ok ? 200 : 500, ['success' => (bool)$ok]);
+                break;
             }
             case 'delete_multiple': {
                 $idsJson = $_POST['ids'] ?? '[]';
@@ -517,81 +385,45 @@ if ($isApi) {
                     respondJson(422, ['error' => 'No notification IDs provided']);
                 }
                 
-                // Sanitize and validate IDs
-                $validIds = [];
+                $deleted = 0;
+                $errors = [];
+                
                 foreach ($ids as $id) {
                     $id = (int)$id;
-                    if ($id > 0) {
-                        $validIds[] = $id;
+                    if (!$id) continue;
+                    
+                    // Verify ownership
+                    if (!ensureOwnsNotification($pdo, (int)$supplier_id, $id)) {
+                        $errors[] = "Notification #{$id} not found or unauthorized";
+                        continue;
+                    }
+                    
+                    $ok = $notification->deleteNotification($id);
+                    if ($ok) {
+                        $deleted++;
+                    } else {
+                        $errors[] = "Failed to delete notification #{$id}";
                     }
                 }
                 
-                if (empty($validIds)) {
-                    respondJson(422, ['error' => 'No valid notification IDs provided']);
-                }
+                logNotificationEvent('supplier_delete_multiple', [
+                    'supplier_id' => (int)$supplier_id, 
+                    'count' => count($ids), 
+                    'deleted' => $deleted,
+                    'errors' => $errors
+                ]);
                 
-                try {
-                    $pdo->beginTransaction();
-                    
-                    // First, verify ownership of all notifications in a single query
-                    $placeholders = implode(',', array_fill(0, count($validIds), '?'));
-                    $verifyStmt = $pdo->prepare("
-                        SELECT id FROM notifications 
-                        WHERE id IN ($placeholders) 
-                        AND recipient_type = 'supplier' 
-                        AND recipient_id = ?
-                    ");
-                    $verifyParams = array_merge($validIds, [(int)$supplier_id]);
-                    $verifyStmt->execute($verifyParams);
-                    $ownedIds = $verifyStmt->fetchAll(PDO::FETCH_COLUMN);
-                    
-                    if (empty($ownedIds)) {
-                        $pdo->rollBack();
-                        respondJson(403, ['error' => 'No notifications found or unauthorized']);
-                    }
-                    
-                    // Delete all owned notifications in a single query
-                    $deletePlaceholders = implode(',', array_fill(0, count($ownedIds), '?'));
-                    $deleteStmt = $pdo->prepare("
-                        DELETE FROM notifications 
-                        WHERE id IN ($deletePlaceholders) 
-                        AND recipient_type = 'supplier' 
-                        AND recipient_id = ?
-                    ");
-                    $deleteParams = array_merge($ownedIds, [(int)$supplier_id]);
-                    $deleteStmt->execute($deleteParams);
-                    $deleted = $deleteStmt->rowCount();
-                    
-                    $pdo->commit();
-                    
-                    $errors = [];
-                    if ($deleted < count($validIds)) {
-                        $errors[] = "Some notifications could not be deleted";
-                    }
-                    
-                    logNotificationEvent('supplier_delete_multiple', [
-                        'supplier_id' => (int)$supplier_id, 
-                        'count' => count($validIds), 
-                        'deleted' => $deleted,
-                        'errors' => $errors
-                    ]);
-                    
-                    respondJson(200, [
-                        'success' => $deleted > 0,
-                        'deleted' => $deleted,
-                        'total' => count($validIds),
-                        'errors' => $errors
-                    ]);
-                } catch (Throwable $e) {
-                    if ($pdo->inTransaction()) {
-                        $pdo->rollBack();
-                    }
-                    logNotificationEvent('supplier_delete_multiple_error', [
-                        'supplier_id' => (int)$supplier_id, 
-                        'error' => $e->getMessage()
-                    ]);
-                    respondJson(500, ['error' => 'Failed to delete notifications: ' . $e->getMessage()]);
-                }
+                respondJson(200, [
+                    'success' => $deleted > 0,
+                    'deleted' => $deleted,
+                    'total' => count($ids),
+                    'errors' => $errors
+                ]);
+            }
+            case 'get_count': {
+                $count = (int)$notification->getUnreadCount('supplier', (int)$supplier_id);
+                respondJson(200, ['count' => $count]);
+                break;
             }
             case 'delete_expired': {
                 $days = (int)($_POST['days'] ?? $_GET['days'] ?? 30);
@@ -603,6 +435,7 @@ if ($isApi) {
                 $deleted = $stmt->rowCount();
                 logNotificationEvent('supplier_delete_expired', ['supplier_id' => (int)$supplier_id, 'days' => $days, 'deleted' => $deleted]);
                 respondJson(200, ['deleted' => $deleted]);
+                break;
             }
             default:
                 respondJson(400, ['error' => 'Unknown action']);
@@ -659,19 +492,24 @@ $filters['to'] = parseDate($_GET['to'] ?? null);
 $filters['date_field'] = ($_GET['date_field'] ?? 'created_at') === 'sent_at' ? 'sent_at' : 'created_at';
 $filters['order'] = strtoupper($_GET['order'] ?? 'DESC');
 
-// Always sync new orders on page load (with duplicate prevention built into sync function)
-// Only sync on initial page load (not on pagination, filters, or API calls)
-$shouldSync = empty($_GET['page']) && empty($_GET['type']) && empty($_GET['status']) && empty($_POST['action']) && empty($_GET['api']);
-if ($shouldSync) {
+// Get last viewed timestamp from session (BEFORE updating it)
+$lastViewedKey = 'notifications_last_viewed_' . $supplier_id;
+$lastViewedTimestamp = $_SESSION[$lastViewedKey] ?? null;
+
+// Only trigger sync on initial page load AND only if explicitly requested via session flag
+// This prevents creating duplicate notifications on every page view/refresh
+$shouldSync = isset($_SESSION['supplier_notifications_sync_needed']) && $_SESSION['supplier_notifications_sync_needed'] === true;
+if ($shouldSync && empty($_GET['page']) && empty($_GET['type']) && empty($_GET['status']) && empty($_POST['action']) && empty($_GET['api'])) {
     try {
-        // Sync orders from last 24 hours - duplicate prevention is built into the sync function
         syncAdminOrdersForSupplier($pdo, (int)$supplier_id, null, true);
-        // Clear any session flag if it exists
+        // Clear the flag after syncing
         unset($_SESSION['supplier_notifications_sync_needed']);
     } catch (Throwable $e) {
-        // Log error but don't break the page
-        error_log("Supplier notification sync error: " . $e->getMessage());
+        // already logged
     }
+} else {
+    // Don't sync automatically - only when explicitly needed (e.g., after a new order is placed)
+    // This prevents deleted notifications from being recreated
 }
 
 $notifications = listSupplierNotifications($pdo, (int)$supplier_id, $filters, $limit, $offset);
@@ -789,7 +627,9 @@ $recentCount = (int)$notification->getRecentNotificationCount('supplier', (int)$
           <div class="col">
             <h1 class="h2 mb-2">
               <i class="bi bi-bell me-2"></i>Notifications
-              <span id="main-notification-badge" class="badge <?= $unreadCount > 0 ? 'bg-danger' : 'bg-light text-dark' ?> ms-2" style="<?= $unreadCount > 0 ? '' : 'display: none;' ?>"><?= (int)$unreadCount ?></span>
+              <?php if ($unreadCount > 0): ?>
+                <span id="main-notification-badge" class="badge bg-light text-dark ms-2"><?= (int)$unreadCount ?></span>
+              <?php endif; ?>
             </h1>
           </div>
           <div class="col-auto">
@@ -873,7 +713,22 @@ $recentCount = (int)$notification->getRecentNotificationCount('supplier', (int)$
             </div>
           <?php else: ?>
             <?php foreach ($notifications as $notif): ?>
-              <div class="notification-item p-3 border-bottom <?= !empty($notif['is_read']) ? '' : 'unread' ?>" role="button" tabindex="0"
+              <?php
+                $createdAt = isset($notif['sent_at']) && $notif['sent_at'] ? $notif['sent_at'] : ($notif['created_at'] ?? null);
+                $statusValue = $notif['status'] ?? 'unread';
+                $isReadValue = isset($notif['is_read']) ? (int)$notif['is_read'] : 0;
+                $isUnread = ($isReadValue == 0 && $statusValue !== 'read');
+                $isNew = false;
+                if ($isUnread && $isReadValue == 0) {
+                    if ($lastViewedTimestamp && $createdAt) {
+                        $isNew = strtotime($createdAt) > strtotime($lastViewedTimestamp);
+                    } else if ($createdAt) {
+                        $minutesSinceCreation = (time() - strtotime($createdAt)) / 60;
+                        $isNew = ($minutesSinceCreation <= 5);
+                    }
+                }
+              ?>
+              <div class="notification-item p-3 border-bottom <?= $isUnread ? 'unread' : '' ?><?= $isNew ? ' notification-new' : '' ?>" role="button" tabindex="0"
                    data-id="<?= (int)$notif['id'] ?>"
                    data-type="<?= htmlspecialchars($notif['type'] ?? '', ENT_QUOTES) ?>"
                    data-message="<?= htmlspecialchars($notif['message'] ?? '', ENT_QUOTES) ?>"
@@ -924,7 +779,7 @@ $recentCount = (int)$notification->getRecentNotificationCount('supplier', (int)$
                         <i class="bi <?= $iconClass ?> text-primary"></i>
                       </div>
                       <span class="badge <?= $badgeClass ?> me-2"><?= ucfirst(str_replace('_', ' ', ($notif['type'] ?? 'Notification'))) ?></span>
-                      <?php if (!($notif['is_read'] ?? ($notif['status'] ?? '') === 'read')): ?>
+                      <?php if ($isNew): ?>
                         <span class="badge bg-danger">New</span>
                       <?php endif; ?>
                     </div>
@@ -988,47 +843,21 @@ $recentCount = (int)$notification->getRecentNotificationCount('supplier', (int)$
   </div>
 </div>
 
+<?php $_SESSION[$lastViewedKey] = date('Y-m-d H:i:s'); ?>
+
 <script>
 // Function to update notification counter (compatible)
 function updateNotificationCounter() {
-  // Count remaining unread notifications from DOM
-  const unreadCount = document.querySelectorAll('.notification-item.unread').length;
-  
-  // Update the badge in the header - create if doesn't exist
-  let badge = document.getElementById('main-notification-badge');
-  if (!badge) {
-    // Create badge if it doesn't exist
-    const h1 = document.querySelector('h1.h2');
-    if (h1) {
-      badge = document.createElement('span');
-      badge.id = 'main-notification-badge';
-      badge.className = 'badge bg-light text-dark ms-2';
-      h1.appendChild(badge);
-    }
-  }
+  // Update the badge in the header if it exists
+  const badge = document.getElementById('main-notification-badge');
   if (badge) {
+    // Count remaining unread notifications
+    const unreadCount = document.querySelectorAll('.notification-item.unread').length;
     if (unreadCount > 0) {
       badge.textContent = unreadCount;
-      badge.className = 'badge bg-danger ms-2';
       badge.style.display = 'inline-block';
     } else {
       badge.style.display = 'none';
-      badge.textContent = '0';
-      badge.className = 'badge bg-light text-dark ms-2';
-    }
-  }
-  
-  // Update sidebar badge
-  const sidebarBadge = document.getElementById('sidebar-notification-badge');
-  if (sidebarBadge) {
-    if (unreadCount > 0) {
-      sidebarBadge.textContent = unreadCount;
-      sidebarBadge.style.display = 'inline';
-      sidebarBadge.setAttribute('aria-label', `Unread notifications: ${unreadCount}`);
-    } else {
-      sidebarBadge.style.display = 'none';
-      sidebarBadge.textContent = '0';
-      sidebarBadge.setAttribute('aria-label', 'No unread notifications');
     }
   }
   
@@ -1063,8 +892,7 @@ function markAsRead(notificationId, element) {
           const newBadge = notificationItem.querySelector('.badge.bg-danger');
           if (newBadge && newBadge.textContent === 'New') newBadge.remove();
         }
-        // Always fetch fresh count from server to ensure accuracy
-        fetchUpdatedNotificationCount();
+        updateNotificationCounter();
         showMessage('Notification marked as read', 'success');
       } else {
         showMessage(data.error || 'Failed to mark notification as read', 'danger');
@@ -1092,29 +920,24 @@ function deleteNotification(notificationId, element) {
         return response.json();
       })
       .then(data => {
-        if (data.success && data.deleted) {
+        if (data.success) {
           const notificationItem = element.closest('.notification-item');
           if (notificationItem) {
+            // Check if deleted notification was unread
+            const wasUnread = notificationItem.classList.contains('unread');
+            
             // Add fade out animation
             notificationItem.style.transition = 'opacity 0.3s ease';
             notificationItem.style.opacity = '0';
             setTimeout(() => {
               notificationItem.remove();
               
-              // Update notification count from server
+              // Force update notification count from server
               fetchUpdatedNotificationCount();
-              
-              // Reload page after a short delay to ensure database changes are reflected
-              setTimeout(() => {
-                window.location.reload();
-              }, 500);
             }, 300);
           } else {
-            // If element not found, reload page immediately
-            showMessage('Notification deleted successfully', 'success');
-            setTimeout(() => {
-              window.location.reload();
-            }, 500);
+            // If element not found, reload page to get fresh count
+            location.reload();
             return;
           }
           showMessage('Notification deleted successfully', 'success');
@@ -1131,8 +954,7 @@ function deleteNotification(notificationId, element) {
 
 // Fetch updated notification count from server
 function fetchUpdatedNotificationCount() {
-  // Use cache busting to ensure fresh data
-  fetch('ajax/get_notification_count.php?t=' + Date.now(), {
+  fetch('notifications.php?api=1&action=get_count&t=' + Date.now(), {
     method: 'GET',
     headers: {
       'Content-Type': 'application/json',
@@ -1151,41 +973,15 @@ function fetchUpdatedNotificationCount() {
     .then(data => {
       const count = data.count || 0;
       
-      // Update badge in header - create if doesn't exist
-      let badge = document.getElementById('main-notification-badge');
-      if (!badge) {
-        // Create badge if it doesn't exist
-        const h1 = document.querySelector('h1.h2');
-        if (h1) {
-          badge = document.createElement('span');
-          badge.id = 'main-notification-badge';
-          badge.className = 'badge bg-light text-dark ms-2';
-          h1.appendChild(badge);
-        }
-      }
+      // Update badge in header
+      const badge = document.getElementById('main-notification-badge');
       if (badge) {
         if (count > 0) {
           badge.textContent = count;
-          badge.className = 'badge bg-danger ms-2';
           badge.style.display = 'inline-block';
         } else {
           badge.style.display = 'none';
           badge.textContent = '0';
-          badge.className = 'badge bg-light text-dark ms-2';
-        }
-      }
-      
-      // Update sidebar badge
-      const sidebarBadge = document.getElementById('sidebar-notification-badge');
-      if (sidebarBadge) {
-        if (count > 0) {
-          sidebarBadge.textContent = count;
-          sidebarBadge.style.display = 'inline';
-          sidebarBadge.setAttribute('aria-label', `Unread notifications: ${count}`);
-        } else {
-          sidebarBadge.style.display = 'none';
-          sidebarBadge.textContent = '0';
-          sidebarBadge.setAttribute('aria-label', 'No unread notifications');
         }
       }
       
@@ -1228,7 +1024,7 @@ function markAllAsRead() {
             newBadges.forEach(badge => { if (badge.textContent === 'New') badge.remove(); });
           });
           
-          // Always fetch fresh count from server to ensure accuracy
+          // Fetch fresh count from server to ensure accuracy
           fetchUpdatedNotificationCount();
           
           showMessage('All notifications marked as read', 'success');
@@ -1377,11 +1173,8 @@ function deleteSelectedNotifications() {
       return response.json();
     })
     .then(data => {
-      if (data.success && data.deleted > 0) {
-        // Show success message
-        showMessage(`${data.deleted} notification(s) deleted successfully`, 'success');
-        
-        // Remove deleted notifications from UI with animation
+      if (data.success) {
+        // Remove deleted notifications from UI
         selectedIds.forEach(id => {
           const notificationItem = document.querySelector(`.notification-item[data-id="${id}"]`);
           if (notificationItem) {
@@ -1405,22 +1198,12 @@ function deleteSelectedNotifications() {
         
         updateDeleteButton();
         
-        // Update count from server
+        // Update count
         fetchUpdatedNotificationCount();
         
-        // Reload page after a short delay to ensure database changes are reflected
-        setTimeout(() => {
-          window.location.reload();
-        }, 500);
+        showMessage(`${data.deleted} notification(s) deleted successfully`, 'success');
       } else {
-        const errorMsg = data.errors && data.errors.length > 0 
-          ? data.errors.join(', ') 
-          : (data.error || 'Failed to delete notifications');
-        showMessage(errorMsg, 'danger');
-        
-        // Clear selection on error too
-        selectedNotifications.clear();
-        updateDeleteButton();
+        showMessage(data.errors ? data.errors.join(', ') : 'Failed to delete notifications', 'danger');
       }
     })
     .catch(error => {
@@ -1490,15 +1273,13 @@ document.addEventListener('DOMContentLoaded', function() {
     // Store original method
     const originalUpdate = window.notificationBadgeManager.updateNotificationBadge.bind(window.notificationBadgeManager);
     
-    // Override to use supplier-specific endpoint
     window.notificationBadgeManager.updateNotificationBadge = async function() {
       if (this.isUpdating) {
         return;
       }
       this.isUpdating = true;
       try {
-        // Use supplier endpoint with cache busting
-        const response = await fetch('ajax/get_notification_count.php?t=' + Date.now(), {
+        const response = await fetch('notifications.php?api=1&action=get_count&t=' + Date.now(), {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',
@@ -1506,7 +1287,7 @@ document.addEventListener('DOMContentLoaded', function() {
             'Pragma': 'no-cache'
           },
           credentials: 'same-origin',
-          cache: 'no-store' // Prevent caching stale data
+          cache: 'no-store'
         });
         
         if (!response.ok) {
@@ -1517,18 +1298,8 @@ document.addEventListener('DOMContentLoaded', function() {
         const count = data.count || 0;
         this.updateBadgeElements(count);
         
-        // Also update the header badge directly - create if doesn't exist
-        let badge = document.getElementById('main-notification-badge');
-        if (!badge) {
-          // Create badge if it doesn't exist
-          const h1 = document.querySelector('h1.h2');
-          if (h1) {
-            badge = document.createElement('span');
-            badge.id = 'main-notification-badge';
-            badge.className = 'badge bg-light text-dark ms-2';
-            h1.appendChild(badge);
-          }
-        }
+        // Also update the header badge directly
+        const badge = document.getElementById('main-notification-badge');
         if (badge) {
           if (count > 0) {
             badge.textContent = count;
@@ -1536,20 +1307,6 @@ document.addEventListener('DOMContentLoaded', function() {
           } else {
             badge.style.display = 'none';
             badge.textContent = '0';
-          }
-        }
-        
-        // Update sidebar badge
-        const sidebarBadge = document.getElementById('sidebar-notification-badge');
-        if (sidebarBadge) {
-          if (count > 0) {
-            sidebarBadge.textContent = count;
-            sidebarBadge.style.display = 'inline';
-            sidebarBadge.setAttribute('aria-label', `Unread notifications: ${count}`);
-          } else {
-            sidebarBadge.style.display = 'none';
-            sidebarBadge.textContent = '0';
-            sidebarBadge.setAttribute('aria-label', 'No unread notifications');
           }
         }
       } catch (error) {
@@ -1567,38 +1324,6 @@ document.addEventListener('DOMContentLoaded', function() {
     // If badge manager doesn't exist, fetch count directly on page load
     fetchUpdatedNotificationCount();
   }
-  
-  // Always fetch count on page load to ensure sidebar badge is correct
-  fetchUpdatedNotificationCount();
-  
-  // Auto-sync new orders every 30 seconds
-  function autoSyncNewOrders() {
-    fetch('notifications.php?api=1&action=sync_admin_orders', {
-      method: 'GET',
-      headers: {
-        'X-Requested-With': 'XMLHttpRequest'
-      },
-      credentials: 'same-origin'
-    })
-    .then(response => response.json())
-    .then(data => {
-      if (data.synced && (data.synced.created > 0 || data.synced.emails > 0)) {
-        // New notifications were created, refresh the page to show them
-        console.log('New notifications synced:', data.synced);
-        // Reload page to show new notifications
-        setTimeout(() => {
-          window.location.reload();
-        }, 1000);
-      }
-    })
-    .catch(error => {
-      console.error('Error syncing orders:', error);
-    });
-  }
-  
-  // Start auto-sync after page load, then every 30 seconds
-  setTimeout(autoSyncNewOrders, 2000); // Initial sync after 2 seconds
-  setInterval(autoSyncNewOrders, 30000); // Then every 30 seconds
 });
 </script>
 

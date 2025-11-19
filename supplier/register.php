@@ -1,39 +1,10 @@
 <?php
-// Enable error reporting for debugging
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
-
-session_start();
-include_once '../config/database.php';
-include_once '../models/user.php';
 include_once '../config/app.php';
-// Calculate root APP_BASE first
-$rootBase = defined('APP_BASE') ? APP_BASE : '';
-$scriptDir = dirname($_SERVER['SCRIPT_NAME'] ?? '');
-if (preg_match('#/(admin|staff|supplier)$#', $rootBase)) {
-    $rootBase = preg_replace('#/(admin|staff|supplier)$#', '', $rootBase);
-} elseif (preg_match('#/(admin|staff|supplier)$#', $scriptDir)) {
-    $rootBase = preg_replace('#/(admin|staff|supplier)$#', '', $scriptDir);
-    $rootBase = str_replace('\\', '/', $rootBase);
-    if ($rootBase === '/' || $rootBase === '\\' || $rootBase === '.' || empty($rootBase)) {
-        $rootBase = '';
-    }
-}
-
-include_once '../database/check_columns.php';
-
-// Check if database columns exist, if not show helpful message (after $rootBase is calculated)
-if (!checkDatabaseColumns() && empty($register_error)) {
-    $register_error = "Database setup required: Missing profile columns. Please run: <a href='" . $rootBase . "/database/fix_now.php' target='_blank'>Database Migration Tool</a> or visit <code>database/fix_now.php</code> in your browser.";
-}
-
-$database = new Database();
-$db = $database->getConnection();
-$user = new User($db);
-
-// Initialize error variables (must be before column check)
-$register_error = '';
-$register_success = '';
+$base = defined('APP_BASE') ? APP_BASE : '';
+if ($base === '/' || $base === '\\') $base = '';
+$target = ($base !== '' ? $base : '') . '/register.php?role=supplier';
+header('Location: ' . $target);
+exit;
 
 // Handle saving form data before Google verification
 if (isset($_GET['save_form_data']) && $_SERVER['REQUEST_METHOD'] === 'POST') {

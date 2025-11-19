@@ -172,3 +172,20 @@ function clearRoleSession(string $role, ?int $userId = null, ?string $token = nu
         unset($_SESSION['user_id'], $_SESSION['username'], $_SESSION['name'], $_SESSION['role']);
     }
 }
+
+function requireManagementAuth(): void {
+    $isAdmin = !empty($_SESSION['admin']['user_id']);
+    $role = $_SESSION['admin']['role'] ?? null;
+    if (!$isAdmin) {
+        http_response_code(401);
+        header('Content-Type: application/json');
+        echo json_encode(['success' => false, 'error' => 'Unauthorized']);
+        exit();
+    }
+    if ($role !== 'management') {
+        http_response_code(403);
+        header('Content-Type: application/json');
+        echo json_encode(['success' => false, 'error' => 'Forbidden']);
+        exit();
+    }
+}

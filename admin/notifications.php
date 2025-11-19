@@ -18,20 +18,6 @@ if (($_SESSION['admin']['role'] ?? null) !== 'management') {
 $db = (new Database())->getConnection();
 $notification = new Notification($db);
 
-// Get pending orders count for badge
-require_once '../models/admin_order.php';
-$adminOrder = new AdminOrder($db);
-$pendingOrdersCount = 0;
-try {
-    $pendingStmt = $db->prepare("SELECT COUNT(*) as count FROM admin_orders WHERE confirmation_status = 'pending'");
-    $pendingStmt->execute();
-    $pendingResult = $pendingStmt->fetch(PDO::FETCH_ASSOC);
-    $pendingOrdersCount = (int)($pendingResult['count'] ?? 0);
-} catch (Exception $e) {
-    error_log("Error getting pending orders count: " . $e->getMessage());
-    $pendingOrdersCount = 0;
-}
-
 // CSRF token setup
 if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
@@ -100,28 +86,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             break;
             
         case 'delete_notification':
-            $notificationId = (int)($_POST['notification_id'] ?? 0);
-            if (!$notificationId) {
-                $message = "Invalid notification ID";
-                $messageType = 'danger';
-            } else {
-                try {
-                    // Delete directly from database with explicit query
-                    $deleteStmt = $db->prepare("DELETE FROM notifications WHERE id = :id");
-                    $deleteStmt->bindValue(':id', $notificationId, PDO::PARAM_INT);
-                    $deleteStmt->execute();
-                    $deleted = $deleteStmt->rowCount() > 0;
-                    
-                    if ($deleted) {
-                        $message = "Notification deleted successfully";
-                        $messageType = 'success';
-                    } else {
-                        $message = "Failed to delete notification (notification not found)";
-                        $messageType = 'danger';
-                    }
-                } catch (Exception $e) {
-                    error_log("Error deleting notification: " . $e->getMessage());
-                    $message = "Error deleting notification: " . htmlspecialchars($e->getMessage());
+            $notificationId = $_POST['notification_id'] ?? '';
+            if ($notificationId) {
+                $result = $notification->deleteNotification($notificationId);
+                if ($result) {
+                    $message = "Notification deleted";
+                    $messageType = 'success';
+                } else {
+                    $message = "Failed to delete notification";
                     $messageType = 'danger';
                 }
             }
@@ -134,50 +106,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $message = "No notifications selected for deletion.";
                 $messageType = "warning";
             } else {
-                // Sanitize and validate IDs
-                $validIds = [];
+                $deletedCount = 0;
+                $failedCount = 0;
+                
                 foreach ($notificationIds as $notifId) {
                     $notifId = intval($notifId);
                     if ($notifId > 0) {
-                        $validIds[] = $notifId;
+                        if ($notification->deleteNotification($notifId)) {
+                            $deletedCount++;
+                        } else {
+                            $failedCount++;
+                        }
                     }
                 }
                 
-                if (empty($validIds)) {
-                    $message = "No valid notification IDs provided.";
-                    $messageType = "warning";
-                } else {
-                    try {
-                        $db->beginTransaction();
-                        
-                        // Delete all notifications in a single batch query
-                        $placeholders = implode(',', array_fill(0, count($validIds), '?'));
-                        $deleteStmt = $db->prepare("DELETE FROM notifications WHERE id IN ($placeholders)");
-                        $deleteStmt->execute($validIds);
-                        $deletedCount = $deleteStmt->rowCount();
-                        
-                        $db->commit();
-                        
-                        if ($deletedCount > 0) {
-                            $message = "Successfully deleted {$deletedCount} notification(s).";
-                            if ($deletedCount < count($validIds)) {
-                                $message .= " " . (count($validIds) - $deletedCount) . " notification(s) could not be deleted.";
-                                $messageType = "warning";
-                            } else {
-                                $messageType = "success";
-                            }
-                        } else {
-                            $message = "Unable to delete selected notifications.";
-                            $messageType = "danger";
-                        }
-                    } catch (Exception $e) {
-                        if ($db->inTransaction()) {
-                            $db->rollBack();
-                        }
-                        error_log("Error deleting notifications: " . $e->getMessage());
-                        $message = "Error deleting notifications: " . htmlspecialchars($e->getMessage());
-                        $messageType = "danger";
+                if ($deletedCount > 0) {
+                    $message = "Successfully deleted {$deletedCount} notification(s).";
+                    if ($failedCount > 0) {
+                        $message .= " {$failedCount} notification(s) could not be deleted.";
+                        $messageType = "warning";
+                    } else {
+                        $messageType = "success";
                     }
+                } else {
+                    $message = "Unable to delete selected notifications.";
+                    $messageType = "danger";
                 }
             }
             break;
@@ -308,13 +261,6 @@ $recentCount = $notification->getRecentNotificationCount('management', 1);
               <span id="main-notification-badge" class="badge bg-primary ms-2" role="status" aria-live="polite" aria-atomic="true" aria-label="Unread notifications: <?= (int)$unreadCount ?>"><?= (int)$unreadCount ?></span>
             <?php else: ?>
               <span id="main-notification-badge" class="badge bg-primary ms-2" role="status" aria-live="polite" aria-atomic="true" aria-label="No unread notifications" style="display:none"></span>
-            <?php endif; ?>
-            <?php if ($pendingOrdersCount > 0): ?>
-              <a href="orders.php" id="pending-orders-badge" class="badge bg-warning text-dark ms-2" role="status" aria-label="Pending orders: <?= (int)$pendingOrdersCount ?>" title="Click to view pending orders">
-                <i class="bi bi-cart-check me-1"></i>New Orders: <?= (int)$pendingOrdersCount ?>
-              </a>
-            <?php else: ?>
-              <a href="orders.php" id="pending-orders-badge" class="badge bg-warning text-dark ms-2" role="status" style="display: none;"></a>
             <?php endif; ?>
           </h1>
           <div class="btn-toolbar mb-2 mb-md-0">
@@ -641,51 +587,6 @@ $recentCount = $notification->getRecentNotificationCount('management', 1);
     }
   }
   
-  // Function to update pending orders badge
-  function updatePendingOrdersBadge() {
-    fetch('ajax/get_pending_orders_count.php')
-      .then(response => response.json())
-      .then(data => {
-        if (data.success) {
-          const count = parseInt(data.pending_orders_count || 0);
-          const badgeContainer = document.querySelector('h1.h2');
-          let ordersBadge = document.getElementById('pending-orders-badge');
-          
-          if (count > 0) {
-            if (!ordersBadge && badgeContainer) {
-              // Create badge if it doesn't exist
-              ordersBadge = document.createElement('a');
-              ordersBadge.id = 'pending-orders-badge';
-              ordersBadge.href = 'orders.php';
-              ordersBadge.className = 'badge bg-warning text-dark ms-2';
-              ordersBadge.setAttribute('role', 'status');
-              ordersBadge.setAttribute('aria-label', 'Pending orders: ' + count);
-              ordersBadge.title = 'Click to view pending orders';
-              ordersBadge.innerHTML = '<i class="bi bi-cart-check me-1"></i>New Orders: ' + count;
-              badgeContainer.appendChild(ordersBadge);
-            } else if (ordersBadge) {
-              // Update existing badge
-              ordersBadge.innerHTML = '<i class="bi bi-cart-check me-1"></i>New Orders: ' + count;
-              ordersBadge.setAttribute('aria-label', 'Pending orders: ' + count);
-              ordersBadge.style.display = '';
-            }
-          } else {
-            // Hide badge if no pending orders
-            if (ordersBadge) {
-              ordersBadge.style.display = 'none';
-            }
-          }
-        }
-      })
-      .catch(error => {
-        console.error('Error updating pending orders badge:', error);
-      });
-  }
-  
-  // Update pending orders badge immediately and periodically
-  updatePendingOrdersBadge();
-  setInterval(updatePendingOrdersBadge, 30000); // Update every 30 seconds
-  
   // Update delete button visibility and count
   function updateDeleteButton() {
     const count = selectedNotifications.size;
@@ -962,24 +863,11 @@ $recentCount = $notification->getRecentNotificationCount('management', 1);
           notificationItem.style.opacity = '0';
           setTimeout(() => {
             notificationItem.remove();
-            
-            // Update counters
-            updateNotificationCounter();
-            
-            // Reload page after a short delay to ensure database changes are reflected
-            setTimeout(() => {
-              window.location.reload();
-            }, 500);
           }, 300);
-        } else {
-          // If element not found, reload page immediately
-          updateNotificationCounter();
-          showMessage('Notification deleted successfully', 'success');
-          setTimeout(() => {
-            window.location.reload();
-          }, 500);
-          return;
         }
+        
+        // Update counters
+        updateNotificationCounter();
         
         // Show success message
         showMessage('Notification deleted successfully', 'success');
@@ -1227,11 +1115,6 @@ $recentCount = $notification->getRecentNotificationCount('management', 1);
           e.preventDefault();
         }
       });
-    }
-    
-    // Initialize NotificationBadgeManager if available
-    if (typeof NotificationBadgeManager !== 'undefined') {
-      window.notificationBadgeManager = new NotificationBadgeManager();
     }
   });
 </script>

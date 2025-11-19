@@ -1609,7 +1609,6 @@ $allAlertsRows = $allAlertsStmt->fetchAll(PDO::FETCH_ASSOC);
                     url: 'ajax/get_alert_counts.php',
                     method: 'GET',
                     dataType: 'json',
-                    cache: false,
                     success: function(response) {
                         if (response.success) {
                             const count = parseInt(response.active_stock_alerts || response.total_alerts || 0);
@@ -1620,30 +1619,16 @@ $allAlertsRows = $allAlertsStmt->fetchAll(PDO::FETCH_ASSOC);
                                 $('h1.h2').append('<span class="badge bg-danger ms-2" id="headerAlertBadge">' + count + '</span>');
                             }
                             
-                            // Update sidebar badge (ensure it exists and is visible)
+                            // Update sidebar badge
                             const $sidebarBadge = $('#sidebarAlertBadge');
                             if (count > 0) {
                                 if ($sidebarBadge.length === 0) {
                                     $('a[href="alerts.php"]').append('<span class="badge bg-danger ms-1" id="sidebarAlertBadge">' + count + '</span>');
                                 } else {
-                                    $sidebarBadge.text(count).css('display', 'inline-block');
+                                    $sidebarBadge.text(count).show();
                                 }
                             } else {
-                                if ($sidebarBadge.length > 0) {
-                                    $sidebarBadge.css('display', 'none');
-                                }
-                            }
-                            
-                            // Update card badge
-                            const $cardBadge = $('#cardAlertBadge');
-                            if ($cardBadge.length > 0) {
-                                const filteredCount = <?= count($filteredAlerts) ?>;
-                                $cardBadge.text(filteredCount);
-                                if (filteredCount > 0) {
-                                    $cardBadge.show();
-                                } else {
-                                    $cardBadge.hide();
-                                }
+                                $sidebarBadge.hide();
                             }
                             
                             // Optionally reload if count changed significantly
@@ -1654,7 +1639,7 @@ $allAlertsRows = $allAlertsStmt->fetchAll(PDO::FETCH_ASSOC);
                         }
                     },
                     error: function() {
-                        // Silently fail - badge will show current count
+                        console.error('Error updating alert counts');
                     }
                 });
             }

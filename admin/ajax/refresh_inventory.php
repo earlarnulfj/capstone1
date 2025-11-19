@@ -19,8 +19,19 @@ try {
         $supplierMap[$row['id']] = $row['name'];
     }
 
-    // Read inventory from completed orders only (matching inventory.php)
-    $stmt = $inventory->readAllFromCompletedOrders();
+    // Read inventory items that exist in admin_orders, orders, or sales_transactions
+    $query = "SELECT i.*, s.name as supplier_name
+              FROM inventory i
+              LEFT JOIN suppliers s ON i.supplier_id = s.id
+              WHERE COALESCE(i.is_deleted, 0) = 0
+                AND (
+                    EXISTS (SELECT 1 FROM admin_orders ao WHERE ao.inventory_id = i.id)
+                    OR EXISTS (SELECT 1 FROM orders o WHERE o.inventory_id = i.id)
+                    OR EXISTS (SELECT 1 FROM sales_transactions st WHERE st.inventory_id = i.id)
+                )
+              ORDER BY i.last_updated DESC, i.name";
+    $stmt = $db->prepare($query);
+    $stmt->execute();
     $items = [];
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         // Skip archived (soft-deleted) items if column exists
@@ -28,37 +39,8 @@ try {
             continue;
         }
 
-        $inventory_id = isset($row['inventory_id']) ? (int)$row['inventory_id'] : (int)$row['id'];
-        
-        // Get ALL completed orders for this inventory item
-        // CRITICAL: Only fetch from admin_orders table (admin/orders.php)
-        // Do NOT fetch from orders table or any other source
-        $completed_orders = [];
-        try {
-            // Get ONLY completed orders from admin_orders table
-            $ordersStmt = $db->prepare("SELECT id, variation, quantity, unit_type, order_date
-                                      FROM admin_orders 
-                                      WHERE inventory_id = ? 
-                                      AND confirmation_status = 'completed' 
-                                      ORDER BY order_date DESC");
-            $ordersStmt->execute([$inventory_id]);
-            while ($orderRow = $ordersStmt->fetch(PDO::FETCH_ASSOC)) {
-                $completed_orders[] = [
-                    'id' => (int)$orderRow['id'],
-                    'variation' => $orderRow['variation'] ?? '',
-                    'quantity' => (int)$orderRow['quantity'],
-                    'unit_type' => $orderRow['unit_type'] ?? 'per piece',
-                    'order_date' => $orderRow['order_date'] ?? null
-                ];
-            }
-            
-            // DO NOT fetch from orders table - we only want data from admin/orders.php
-        } catch (Exception $e) {
-            error_log("Error getting completed orders from admin_orders in AJAX: " . $e->getMessage());
-        }
-
         // Compute variations, prices, and stocks
-        $varsStmt = $invVar->getByInventory($inventory_id);
+        $varsStmt = $invVar->getByInventory((int)$row['id']);
         $variationList = [];
         $variationPrices = [];
         $variationStocks = [];
@@ -79,7 +61,7 @@ try {
                 // Query directly from database to ensure fresh data (no caching)
                 $stockQuery = "SELECT variation, quantity FROM inventory_variations WHERE inventory_id = ? AND LOWER(unit_type) = LOWER(?)";
                 $stockStmt = $db->prepare($stockQuery);
-                $stockStmt->execute([$inventory_id, $unitType]);
+                $stockStmt->execute([(int)$row['id'], $unitType]);
                 $variationStocks = [];
                 while ($stockRow = $stockStmt->fetch(PDO::FETCH_ASSOC)) {
                     $variationStocks[$stockRow['variation']] = (int)$stockRow['quantity'];
@@ -87,20 +69,21 @@ try {
             } catch (Throwable $e) { 
                 // Fallback to model method if direct query fails
                 try {
-                    $variationStocks = $invVar->getStocksMap($inventory_id, $unitType);
+                    $variationStocks = $invVar->getStocksMap((int)$row['id'], $unitType);
                 } catch (Throwable $e2) {
                     $variationStocks = [];
                 }
             }
         }
 
-        // Attach unified fields expected by inventory.php structure
+        // Attach unified fields expected by supplier/products.php structure
         $row['variations'] = $variationList; // array of strings
         $row['variation_prices'] = $variationPrices; // map variation => price(float)
         $row['variation_stocks'] = $variationStocks; // map variation => stock(int)
         $row['unit_type'] = $unitType; // lower-case string
         $row['supplier_name'] = isset($supplierMap[$row['supplier_id']]) ? $supplierMap[$row['supplier_id']] : 'Admin';
-        $row['completed_orders'] = $completed_orders; // ALL completed orders for this inventory item
+        // Remove any origin-related fields before output
+        if (isset($row['source_type'])) { unset($row['source_type']); }
         $items[] = $row;
     }
 

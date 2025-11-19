@@ -4,6 +4,9 @@ require_once '../config/database.php';
 require_once '../models/inventory.php';
 require_once '../models/supplier.php';
 require_once '../models/inventory_variation.php';
+// Supplier catalog models for mirroring
+require_once '../models/supplier_catalog.php';
+require_once '../models/supplier_product_variation.php';
 
 if (empty($_SESSION['staff']['user_id']) || ($_SESSION['staff']['role'] ?? null) !== 'staff') {
     header("Location: ../login.php");
@@ -15,61 +18,55 @@ $inventory = new Inventory($db);
 $supplier = new Supplier($db);
 $invVariation = new InventoryVariation($db);
 
-// ====== Helper functions for variation display ======
-// Format variation for display: "Brand:Adidas|Size:Large|Color:Red" -> "Adidas - Large - Red" (combine values with dashes)
-function formatVariationForDisplay($variation) {
-    if (empty($variation)) return '';
-    if (strpos($variation, '|') === false && strpos($variation, ':') === false) return $variation;
-    
-    $parts = explode('|', $variation);
-    $values = [];
-    foreach ($parts as $part) {
-        $av = explode(':', trim($part), 2);
-        if (count($av) === 2) {
-            $values[] = trim($av[1]);
-        } else {
-            $values[] = trim($part);
-        }
-    }
-    return implode(' - ', $values);
-}
-
-// Format variation with labels: "Brand:Generic|Size:Large" -> "Brand: Generic | Size: Large"
-function formatVariationWithLabels($variation) {
-    if (empty($variation)) return '';
-    if (strpos($variation, '|') === false && strpos($variation, ':') === false) return $variation;
-    
-    $parts = explode('|', $variation);
-    $formatted = [];
-    foreach ($parts as $part) {
-        $av = explode(':', trim($part), 2);
-        if (count($av) === 2) {
-            $formatted[] = trim($av[0]) . ': ' . trim($av[1]);
-        } else {
-            $formatted[] = trim($part);
-        }
-    }
-    return implode(' | ', $formatted);
-}
-
-// NOTE: Inventory now only shows products from completed orders
-// Products from supplier/products.php are NOT synced to inventory
-// They only appear in supplier/supplier_details.php
-
-// IMPORTANT: Sync ALL completed orders to inventory table first
-// This ensures all completed orders are stored in the inventory database
-// The readAllFromCompletedOrders() method also calls sync, but we do it here explicitly
-// to ensure data is always up-to-date when the page loads
+// --- Preflight: mirror missing supplier_catalog records into inventory ---
 try {
-    // Sync all completed orders from both admin_orders and orders tables
-    $inventory->syncAllCompletedOrdersToInventory();
-} catch (Exception $e) {
-    error_log("Error syncing completed orders to inventory on page load: " . $e->getMessage());
+    $hasCatalog = (bool)$db->query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'supplier_catalog'")->fetchColumn();
+    if ($hasCatalog) {
+        $sql = "SELECT sc.*
+                FROM supplier_catalog sc
+                LEFT JOIN inventory i ON i.sku = sc.sku AND i.supplier_id = sc.supplier_id
+                WHERE sc.is_deleted = 0 AND i.id IS NULL";
+        $stmtMissing = $db->prepare($sql);
+        $stmtMissing->execute();
+        $spv = new SupplierProductVariation($db);
+        while ($sc = $stmtMissing->fetch(PDO::FETCH_ASSOC)) {
+            // Avoid conflicts if SKU already exists globally
+            if ($inventory->skuExists($sc['sku'])) { continue; }
+            // Create mirrored inventory item
+            $inventory->sku = $sc['sku'];
+            $inventory->name = $sc['name'];
+            $inventory->description = $sc['description'] ?? '';
+            $inventory->quantity = 0;
+            $inventory->reorder_threshold = isset($sc['reorder_threshold']) ? (int)$sc['reorder_threshold'] : 0;
+            $inventory->category = $sc['category'] ?? '';
+            $inventory->unit_price = isset($sc['unit_price']) ? (float)$sc['unit_price'] : 0;
+            $inventory->location = $sc['location'] ?? '';
+            $supplierId = (int)$sc['supplier_id'];
+
+            $db->beginTransaction();
+            try {
+                if (!$inventory->createForSupplier($supplierId)) { throw new Exception('createForSupplier failed'); }
+                $newInvId = (int)$db->lastInsertId();
+                // Mirror variations from supplier_product_variations
+                $variants = $spv->getByProduct((int)$sc['id']);
+                foreach ($variants as $vr) {
+                    $vt = $vr['unit_type'] ?? ($sc['unit_type'] ?? 'per piece');
+                    $price = isset($vr['unit_price']) ? (float)$vr['unit_price'] : null;
+                    $invVariation->createVariant($newInvId, $vr['variation'], $vt, 0, $price);
+                }
+                $db->commit();
+            } catch (Throwable $e) {
+                if ($db->inTransaction()) { $db->rollBack(); }
+                // Continue
+            }
+        }
+    }
+} catch (Throwable $e) {
+    // Ignore preflight sync errors to keep staff UI responsive
 }
 
-// Get all inventory items from completed orders only (not from supplier catalog)
-// This method also calls syncAllCompletedOrdersToInventory() internally for double safety
-$stmt = $inventory->readAllFromCompletedOrders();
+// Get all inventory items including those from completed deliveries
+$stmt = $inventory->readAllIncludingDeliveries();
 // Compute ordered inventory IDs (non-cancelled orders)
 $orderedInventoryIds = [];
 $orderedStmt = $db->query("SELECT DISTINCT inventory_id FROM orders WHERE confirmation_status <> 'cancelled'");
@@ -129,7 +126,6 @@ while ($row = $suppliers->fetch(PDO::FETCH_ASSOC)) { $suppliersArr[] = $row; }
                                         <th>Reorder Threshold</th>
                                         <th>Unit Type</th>
                                         <th>Variations</th>
-                                        <th>Stocks</th>
                                         <th>Supplier</th>
                                         <th>Location</th>
                                         <th>Source</th>
@@ -139,116 +135,61 @@ while ($row = $suppliers->fetch(PDO::FETCH_ASSOC)) { $suppliersArr[] = $row; }
                                 <tbody>
                                     <?php while ($row = $stmt->fetch(PDO::FETCH_ASSOC)): ?>
                                         <?php
-                                        // Use inventory_id to get variations
-                                        $inventory_id = isset($row['inventory_id']) ? (int)$row['inventory_id'] : (int)$row['id'];
-                                        $__vars_row = $invVariation->getByInventory($inventory_id);
+                                        $__vars_row = $invVariation->getByInventory($row['id']);
                                         $__names_row = [];
                                         $__price_map = [];
                                         foreach ($__vars_row as $__vr) { 
                                             $__names_row[] = $__vr['variation']; 
                                             $__price_map[$__vr['variation']] = isset($__vr['unit_price']) ? (float)$__vr['unit_price'] : null;
                                         }
-                                        $__display_row = !empty($__names_row) ? implode(', ', array_slice($__names_row, 0, 6)) : '';
-                                        $__unit_type_row = (!empty($__vars_row) && isset($__vars_row[0]['unit_type'])) ? $__vars_row[0]['unit_type'] : ($row['unit_type'] ?? 'Per Piece');
-                                        $__price_map_json = htmlspecialchars(json_encode($__price_map), ENT_QUOTES);
-                                        // Stocks map aligned with unit type (lower-case for lookup)
-                                        $__stock_map = [];
-                                        try { $__stock_map = $invVariation->getStocksMap($inventory_id, strtolower($__unit_type_row ?: 'per piece')); } catch (Throwable $e) { $__stock_map = []; }
-                                        $__stock_map_json = htmlspecialchars(json_encode($__stock_map), ENT_QUOTES);
-                                        
-                                        // Get all completed orders for this inventory item (one entry per order)
-                                        // CRITICAL: Only fetch from admin_orders table (admin/orders.php)
-                                        // Do NOT fetch from orders table or any other source
-                                        $__completed_orders_map = [];
-                                        try {
-                                            // Get ONLY completed orders from admin_orders table
-                                            $ordersStmt = $db->prepare("SELECT id, variation, quantity, unit_type, order_date
-                                                                      FROM admin_orders 
-                                                                      WHERE inventory_id = ? 
-                                                                      AND confirmation_status = 'completed' 
-                                                                      ORDER BY order_date DESC");
-                                            $ordersStmt->execute([$inventory_id]);
-                                            while ($orderRow = $ordersStmt->fetch(PDO::FETCH_ASSOC)) {
-                                                $orderId = 'admin_' . (int)$orderRow['id'];
-                                                // Add ALL orders - each order ID is unique
-                                                $__completed_orders_map[$orderId] = [
-                                                    'id' => (int)$orderRow['id'],
-                                                    'variation' => $orderRow['variation'] ?? '',
-                                                    'quantity' => (int)$orderRow['quantity'],
-                                                    'unit_type' => $orderRow['unit_type'] ?? 'per piece',
-                                                    'order_date' => $orderRow['order_date'] ?? null
-                                                ];
-                                            }
-                                            
-                                            // DO NOT fetch from orders table - we only want data from admin/orders.php
-                                            
-                                            // Convert map to array
-                                            $__completed_orders = array_values($__completed_orders_map);
-                                        } catch (Exception $e) {
-                                            error_log("Error getting completed orders from admin_orders: " . $e->getMessage());
-                                            $__completed_orders = [];
-                                        }
+                                            $__display_row = !empty($__names_row) ? implode(', ', array_slice($__names_row, 0, 6)) : '';
+                                            $__unit_type_row = (!empty($__vars_row) && isset($__vars_row[0]['unit_type'])) ? $__vars_row[0]['unit_type'] : 'Per Piece';
+                                            $__price_map_json = htmlspecialchars(json_encode($__price_map), ENT_QUOTES);
+                                            // Stocks map aligned with unit type (lower-case for lookup)
+                                            $__stock_map = [];
+                                            try { $__stock_map = $invVariation->getStocksMap((int)$row['id'], strtolower($__unit_type_row ?: 'per piece')); } catch (Throwable $e) { $__stock_map = []; }
+                                            $__stock_map_json = htmlspecialchars(json_encode($__stock_map), ENT_QUOTES);
                                         ?>
                                         <tr>
-                                            <td><?php echo htmlspecialchars($row['sku'] ?? ''); ?></td>
-                                            <td><?php echo htmlspecialchars($row['name'] ?? ''); ?></td>
-                                            <td><?php echo htmlspecialchars($row['category'] ?? ''); ?></td>
-                                            <td><?php echo htmlspecialchars($row['reorder_threshold'] ?? 0); ?></td>
+                                            <td><?php echo $row['sku']; ?></td>
+                                            <td><?php echo $row['name']; ?></td>
+                                            <td><?php echo $row['category']; ?></td>
+                                            <td><?php echo $row['reorder_threshold']; ?></td>
                                             <td><span class="badge bg-secondary"><?php echo htmlspecialchars($__unit_type_row); ?></span></td>
                                             <td>
-                                                <?php if (!empty($__completed_orders)) { ?>
-                                                    <?php foreach ($__completed_orders as $order) { 
-                                                        $ordered_variation = isset($order['variation']) ? trim($order['variation']) : '';
-                                                    ?>
-                                                        <div class="mb-3">
-                                                            <?php if (!empty($ordered_variation)): ?>
-                                                                <div class="d-flex flex-column">
-                                                                    <span class="badge bg-info mb-1 fs-6">
-                                                                        <i class="bi bi-tag-fill me-1"></i><?= htmlspecialchars(formatVariationForDisplay($ordered_variation)) ?>
-                                                                    </span>
-                                                                    <small class="text-muted"><?= htmlspecialchars(formatVariationWithLabels($ordered_variation)) ?></small>
-                                                                </div>
-                                                            <?php else: ?>
-                                                                <span class="badge bg-secondary">No Variation</span>
-                                                            <?php endif; ?>
-                                                        </div>
-                                                    <?php } ?>
-                                                <?php } else { echo '<span class="text-muted">—</span>'; } ?>
+                                                <?php if (!empty($__vars_row)) { ?>
+                                                    <select class="form-select form-select-sm variation-select" aria-label="Select variation">
+                                                        <?php foreach ($__vars_row as $__vr) { 
+                                                            $vName = $__vr['variation'];
+                                                            $vPrice = isset($__price_map[$vName]) ? $__price_map[$vName] : 0;
+                                                            $vStock = isset($__stock_map[$vName]) ? $__stock_map[$vName] : 0;
+                                                            $lowClass = ($vStock <= (int)$row['reorder_threshold']) ? ' text-warning' : '';
+                                                        ?>
+                                                            <option value="<?php echo htmlspecialchars($vName); ?>" data-price="<?php echo htmlspecialchars($vPrice); ?>" data-stock="<?php echo htmlspecialchars($vStock); ?>" class="<?php echo $lowClass; ?>">
+                                                                <?php echo htmlspecialchars($vName); ?> — ₱<?php echo number_format((float)$vPrice, 2); ?>
+                                                            </option>
+                                                        <?php } ?>
+                                                    </select>
+                                                <?php } else { echo '—'; } ?>
                                             </td>
-                                            <td>
-                                                <?php if (!empty($__completed_orders)) { ?>
-                                                    <?php foreach ($__completed_orders as $order) { 
-                                                        $order_qty = (int)($order['quantity'] ?? 0);
-                                                    ?>
-                                                        <div class="mb-3">
-                                                            <div class="d-flex flex-column align-items-start">
-                                                                <span class="badge bg-primary fs-6 mb-1">
-                                                                    <i class="bi bi-box-seam me-1"></i><strong><?= $order_qty ?></strong> pcs
-                                                                </span>
-                                                                <small class="text-muted">Quantity Ordered</small>
-                                                            </div>
-                                                        </div>
-                                                    <?php } ?>
-                                                <?php } else { echo '<span class="text-muted">—</span>'; } ?>
-                                            </td>
-                                            <td><?php echo htmlspecialchars($row['supplier_name'] ?? ''); ?></td>
-                                            <td><?php echo htmlspecialchars($row['location'] ?? ''); ?></td>
+                                            <td><?php echo $row['supplier_name']; ?></td>
+                                            <td><?php echo $row['location']; ?></td>
                                             <td>
                                                 <span class="badge <?php echo ($row['source_type'] === 'Admin Created') ? 'bg-primary' : 'bg-success'; ?>">
-                                                    <?php echo htmlspecialchars($row['source_type'] ?? 'From Completed Order'); ?>
+                                                    <?php echo $row['source_type']; ?>
                                                 </span>
                                             </td>
                                             <td>
                                                 <button type="button" class="btn btn-sm btn-info view-btn" 
                                                     data-id="<?php echo $row['id']; ?>"
-                                                    data-sku="<?php echo htmlspecialchars($row['sku'] ?? ''); ?>"
-                                                    data-name="<?php echo htmlspecialchars($row['name'] ?? ''); ?>"
-                                                    data-description="<?php echo htmlspecialchars($row['description'] ?? ''); ?>"
-                                                    data-reorder="<?php echo $row['reorder_threshold'] ?? 0; ?>"
-                                                    data-supplier="<?php echo $row['supplier_id'] ?? ''; ?>"
-                                                    data-category="<?php echo htmlspecialchars($row['category'] ?? ''); ?>"
-                                                    data-location="<?php echo htmlspecialchars($row['location'] ?? ''); ?>"
-                                                    data-source="<?php echo htmlspecialchars($row['source_type'] ?? 'From Completed Order'); ?>"
+                                                    data-sku="<?php echo $row['sku']; ?>"
+                                                    data-name="<?php echo $row['name']; ?>"
+                                                    data-description="<?php echo $row['description']; ?>"
+                                                    data-reorder="<?php echo $row['reorder_threshold']; ?>"
+                                                    data-supplier="<?php echo $row['supplier_id']; ?>"
+                                                    data-category="<?php echo $row['category']; ?>"
+                                                    data-location="<?php echo $row['location']; ?>"
+                                                    data-source="<?php echo $row['source_type']; ?>"
                                                     data-variations="<?php echo htmlspecialchars($__display_row); ?>"
                                                     data-unit_type="<?php echo htmlspecialchars($__unit_type_row); ?>"
                                                     data-variation_prices="<?php echo $__price_map_json; ?>"
@@ -356,16 +297,9 @@ while ($row = $suppliers->fetch(PDO::FETCH_ASSOC)) { $suppliersArr[] = $row; }
             Object.keys(priceMap).forEach(function(name){
                 var price = parseFloat(priceMap[name] || 0);
                 var stock = parseInt((stockMap[name] || 0), 10);
-                var lowStock = stock <= reorder;
-                var stockClass = stock > 0 ? (lowStock ? 'bg-warning' : 'bg-success') : 'bg-danger';
-                var lowClass = lowStock ? ' text-warning' : '';
+                var lowClass = stock <= reorder ? ' text-warning' : '';
                 $sel.append('<option value="'+name.replace(/"/g,'&quot;')+'" data-price="'+price.toFixed(2)+'" data-stock="'+stock+'" class="'+lowClass+'">'+name+' — ₱'+price.toFixed(2)+'</option>');
-                listHtml += '<div class="d-flex justify-content-between align-items-center mb-2 p-2 border rounded">' +
-                            '<span class="fw-semibold">'+name+'</span>' +
-                            '<div class="d-flex align-items-center gap-2">' +
-                            '<span class="text-muted">₱'+price.toFixed(2)+'</span>' +
-                            '<span class="badge '+stockClass+' text-white">Stock: '+stock+'</span>' +
-                            '</div></div>';
+                listHtml += '<span class="badge bg-light text-dark me-1'+lowClass+'">'+name+' — ₱'+price.toFixed(2)+' — Qty '+stock+'</span>';
             });
             $('#view-variation-list').html(listHtml || '<span class="text-muted">No variations</span>');
             var $opt = $sel.find('option').first();
@@ -396,30 +330,17 @@ while ($row = $suppliers->fetch(PDO::FETCH_ASSOC)) { $suppliersArr[] = $row; }
                         var unitBadge = '<span class="badge bg-secondary">' + (item.unit_type ? item.unit_type : 'Per Piece') + '</span>';
                         var variationsDisplay = '';
                         var vp = item.variation_prices ? JSON.stringify(item.variation_prices).replace(/\"/g, '&quot;') : '';
-                        var vs = item.variation_stocks ? JSON.stringify(item.variation_stocks).replace(/\"/g, '&quot;') : '{}';
-                        // Build dropdown from both prices and stocks to ensure all variations are included
-                        var allVariations = new Set();
+                        var vs = item.variation_stocks ? JSON.stringify(item.variation_stocks).replace(/\"/g, '&quot;') : '';
                         if (item.variation_prices) {
-                            Object.keys(item.variation_prices).forEach(function(k) { allVariations.add(k); });
-                        }
-                        if (item.variation_stocks) {
-                            Object.keys(item.variation_stocks).forEach(function(k) { allVariations.add(k); });
-                        }
-                        
-                        if (allVariations.size > 0) {
                             var reorder = parseInt(item.reorder_threshold, 10) || 0;
-                            var variationArray = Array.from(allVariations);
                             variationsDisplay = '<select class="form-select form-select-sm variation-select" aria-label="Select variation">';
-                            variationArray.forEach(function(name){
-                                var price = parseFloat((item.variation_prices && item.variation_prices[name]) || 0);
+                            Object.keys(item.variation_prices).forEach(function(name){
+                                var price = parseFloat(item.variation_prices[name] || 0);
                                 var stock = parseInt((item.variation_stocks && item.variation_stocks[name]) || 0, 10);
                                 var lowClass = stock <= reorder ? ' text-warning' : '';
-                                var stockClass = stock > 0 ? 'text-success fw-bold' : 'text-danger';
-                                variationsDisplay += '<option value="'+name.replace(/\"/g,'&quot;')+'" data-price="'+price.toFixed(2)+'" data-stock="'+stock+'" class="'+lowClass+' '+stockClass+'">'+name.replace(/</g, '&lt;').replace(/>/g, '&gt;')+' — ₱'+price.toFixed(2)+'</option>';
+                                variationsDisplay += '<option value="'+name.replace(/\"/g,'&quot;')+'" data-price="'+price.toFixed(2)+'" data-stock="'+stock+'" class="'+lowClass+'">'+name+' — ₱'+price.toFixed(2)+'</option>';
                             });
                             variationsDisplay += '</select>';
-                        } else {
-                            variationsDisplay = '<span class="text-muted">—</span>';
                         }
                         var vt = item.unit_type ? item.unit_type : 'Per Piece';
                         var row = [
@@ -469,16 +390,9 @@ while ($row = $suppliers->fetch(PDO::FETCH_ASSOC)) { $suppliersArr[] = $row; }
                 Object.keys(priceMap).forEach(function(name){
                     var price = parseFloat(priceMap[name] || 0);
                     var stock = parseInt((stockMap[name] || 0), 10);
-                    var lowStock = stock <= reorder;
-                    var stockClass = stock > 0 ? (lowStock ? 'bg-warning' : 'bg-success') : 'bg-danger';
-                    var lowClass = lowStock ? ' text-warning' : '';
+                    var lowClass = stock <= reorder ? ' text-warning' : '';
                     $sel.append('<option value="'+name.replace(/"/g,'&quot;')+'" data-price="'+price.toFixed(2)+'" data-stock="'+stock+'" class="'+lowClass+'">'+name+' — ₱'+price.toFixed(2)+'</option>');
-                    listHtml += '<div class="d-flex justify-content-between align-items-center mb-2 p-2 border rounded">' +
-                                '<span class="fw-semibold">'+name+'</span>' +
-                                '<div class="d-flex align-items-center gap-2">' +
-                                '<span class="text-muted">₱'+price.toFixed(2)+'</span>' +
-                                '<span class="badge '+stockClass+' text-white">Stock: '+stock+'</span>' +
-                                '</div></div>';
+                    listHtml += '<span class="badge bg-light text-dark me-1'+lowClass+'">'+name+' — ₱'+price.toFixed(2)+' — Qty '+stock+'</span>';
                 });
                 $('#view-variation-list').html(listHtml || '<span class="text-muted">No variations</span>');
                 // Set selected info
@@ -502,4 +416,3 @@ while ($row = $suppliers->fetch(PDO::FETCH_ASSOC)) { $suppliersArr[] = $row; }
     </script>
 </body>
 </html>
-

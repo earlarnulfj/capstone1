@@ -4,6 +4,7 @@ require_once '../config/database.php';
 require_once '../models/order.php';
 require_once '../models/delivery.php';
 require_once '../models/payment.php';
+require_once '../models/inventory_variation.php';
 
 // Removed: delivery-based auto-completion helper is no longer used
 
@@ -118,6 +119,7 @@ $db = $database->getConnection();
 $order = new Order($db);
 $delivery = new Delivery($db);
 $payment = new Payment($db);
+$invVariation = new InventoryVariation($db);
 
 // Get supplier information
 $supplier_id = $_SESSION['user_id'];
@@ -186,8 +188,29 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_deliveries') {
             default:
                 $workflow_status = $row['confirmation_status'];
         }
-        $row['workflow_status'] = $workflow_status;
-        $exportOrders[] = $row;
+    $row['workflow_status'] = $workflow_status;
+    $invId = isset($row['inventory_id']) ? (int)$row['inventory_id'] : 0;
+    $varKey = isset($row['variation']) ? (string)$row['variation'] : '';
+    $uType  = isset($row['unit_type']) ? (string)$row['unit_type'] : 'per piece';
+    $eff    = isset($row['unit_price']) ? (float)$row['unit_price'] : 0.0;
+    if (($eff === 0.0 || $eff === null) && $invId > 0 && $varKey !== '') {
+        $try = $invVariation->getPrice($invId, $varKey, $uType);
+        if ($try !== null && $try > 0) { $eff = (float)$try; }
+        if ($eff === 0.0) {
+            $varData = $invVariation->getVariationDataByInventory($invId);
+            if (!empty($varData['prices'][$varKey]) && $varData['prices'][$varKey] > 0) {
+                $eff = (float)$varData['prices'][$varKey];
+            }
+        }
+        if ($eff === 0.0) {
+            $varPriceStmt = $db->prepare("SELECT unit_price FROM admin_orders WHERE inventory_id = :inv_id AND variation = :variation ORDER BY order_date DESC LIMIT 1");
+            $varPriceStmt->execute([':inv_id' => $invId, ':variation' => $varKey]);
+            $varPriceRow = $varPriceStmt->fetch(PDO::FETCH_ASSOC);
+            if ($varPriceRow && (float)$varPriceRow['unit_price'] > 0) { $eff = (float)$varPriceRow['unit_price']; }
+        }
+    }
+    $row['unit_price_effective'] = $eff;
+    $exportOrders[] = $row;
     }
     
     // Calculate statistics
@@ -198,7 +221,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_deliveries') {
     $completed = count(array_filter($exportOrders, function($o) { return $o['workflow_status'] === 'completed'; }));
     $cancelled = count(array_filter($exportOrders, function($o) { return $o['workflow_status'] === 'cancelled'; }));
     $total_revenue = array_sum(array_map(function($o) {
-        return $o['workflow_status'] === 'completed' ? $o['quantity'] * ($o['unit_price'] ?? 0) : 0;
+        $price = isset($o['unit_price_effective']) ? (float)$o['unit_price_effective'] : (float)($o['unit_price'] ?? 0);
+        return $o['workflow_status'] === 'completed' ? ((int)$o['quantity']) * $price : 0;
     }, $exportOrders));
     
     // Statistics section
@@ -219,7 +243,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_deliveries') {
     
     foreach ($exportOrders as $order_item) {
         $variation = !empty($order_item['variation']) ? formatVariationForDisplay($order_item['variation']) : 'N/A';
-        $total = ($order_item['quantity'] ?? 0) * ($order_item['unit_price'] ?? 0);
+        $price = isset($order_item['unit_price_effective']) ? (float)$order_item['unit_price_effective'] : (float)($order_item['unit_price'] ?? 0);
+        $total = ((int)($order_item['quantity'] ?? 0)) * $price;
         
         fputcsv($output, [
             $order_item['id'] ?? '',
@@ -227,7 +252,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_deliveries') {
             $variation,
             $order_item['quantity'] ?? 0,
             $order_item['unit_type'] ?? 'N/A',
-            number_format($order_item['unit_price'] ?? 0, 2),
+            number_format($price, 2),
             number_format($total, 2),
             ucfirst(str_replace('_', ' ', $order_item['workflow_status'] ?? 'N/A')),
             $order_item['order_date'] ? date('Y-m-d', strtotime($order_item['order_date'])) : 'N/A'
@@ -696,6 +721,28 @@ while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
     }
     
     $row['workflow_status'] = $workflow_status;
+    // Compute effective unit price with robust fallbacks
+    $invId = isset($row['inventory_id']) ? (int)$row['inventory_id'] : 0;
+    $varKey = isset($row['variation']) ? (string)$row['variation'] : '';
+    $uType  = isset($row['unit_type']) ? (string)$row['unit_type'] : 'per piece';
+    $eff    = isset($row['unit_price']) ? (float)$row['unit_price'] : 0.0;
+    if (($eff === 0.0 || $eff === null) && $invId > 0 && $varKey !== '') {
+        $try = $invVariation->getPrice($invId, $varKey, $uType);
+        if ($try !== null && $try > 0) { $eff = (float)$try; }
+        if ($eff === 0.0) {
+            $varData = $invVariation->getVariationDataByInventory($invId);
+            if (!empty($varData['prices'][$varKey]) && $varData['prices'][$varKey] > 0) {
+                $eff = (float)$varData['prices'][$varKey];
+            }
+        }
+        if ($eff === 0.0) {
+            $varPriceStmt = $db->prepare("SELECT unit_price FROM admin_orders WHERE inventory_id = :inv_id AND variation = :variation ORDER BY order_date DESC LIMIT 1");
+            $varPriceStmt->execute([':inv_id' => $invId, ':variation' => $varKey]);
+            $varPriceRow = $varPriceStmt->fetch(PDO::FETCH_ASSOC);
+            if ($varPriceRow && (float)$varPriceRow['unit_price'] > 0) { $eff = (float)$varPriceRow['unit_price']; }
+        }
+    }
+    $row['unit_price_effective'] = $eff;
     $orders[] = $row;
 }
 
@@ -716,7 +763,8 @@ $cancelled = count(array_filter($orders, function($o) { return $o['workflow_stat
 
 // Calculate total revenue from completed orders
 $total_revenue = array_sum(array_map(function($o) {
-    return $o['workflow_status'] === 'completed' ? $o['quantity'] * ($o['unit_price'] ?? 0) : 0;
+    $price = isset($o['unit_price_effective']) ? (float)$o['unit_price_effective'] : (float)($o['unit_price'] ?? 0);
+    return $o['workflow_status'] === 'completed' ? ((int)$o['quantity']) * $price : 0;
 }, $orders));
 ?>
 <!DOCTYPE html>
@@ -1048,8 +1096,9 @@ $total_revenue = array_sum(array_map(function($o) {
                                                 <td><?php echo htmlspecialchars($order_item['unit_type'] ?? 'N/A'); ?></td>
                                                 <td>
                                                     <div class="d-flex flex-column">
-                                                        <strong class="text-success fs-6">₱<?php echo number_format($order_item['quantity'] * ($order_item['unit_price'] ?? 0), 2); ?></strong>
-                                                        <small class="text-muted">(₱<?php echo number_format($order_item['unit_price'] ?? 0, 2); ?> × <?= $order_item['quantity'] ?>)</small>
+                                                        <?php $eff = isset($order_item['unit_price_effective']) ? (float)$order_item['unit_price_effective'] : (float)($order_item['unit_price'] ?? 0); ?>
+                                                        <strong class="text-success fs-6">₱<?php echo number_format(((int)$order_item['quantity']) * $eff, 2); ?></strong>
+                                                        <small class="text-muted">(₱<?php echo number_format($eff, 2); ?> × <?= (int)$order_item['quantity'] ?>)</small>
                                                     </div>
                                                 </td>
                                                 <td>
@@ -1143,8 +1192,9 @@ $total_revenue = array_sum(array_map(function($o) {
                                                 </td>
                                                 <td>
                                                     <div class="d-flex flex-column">
-                                                        <strong class="text-success fs-6">₱<?php echo number_format($order_item['quantity'] * ($order_item['unit_price'] ?? 0), 2); ?></strong>
-                                                        <small class="text-muted">(₱<?php echo number_format($order_item['unit_price'] ?? 0, 2); ?> × <?= $order_item['quantity'] ?>)</small>
+                                                        <?php $eff = isset($order_item['unit_price_effective']) ? (float)$order_item['unit_price_effective'] : (float)($order_item['unit_price'] ?? 0); ?>
+                                                        <strong class="text-success fs-6">₱<?php echo number_format(((int)$order_item['quantity']) * $eff, 2); ?></strong>
+                                                        <small class="text-muted">(₱<?php echo number_format($eff, 2); ?> × <?= (int)$order_item['quantity'] ?>)</small>
                                                     </div>
                                                 </td>
                                                 <td><?php echo date('M j, Y', strtotime($order_item['order_date'])); ?></td>
@@ -1215,8 +1265,9 @@ $total_revenue = array_sum(array_map(function($o) {
                                                 </td>
                                                 <td>
                                                     <div class="d-flex flex-column">
-                                                        <strong class="text-success fs-6">₱<?php echo number_format($order_item['quantity'] * ($order_item['unit_price'] ?? 0), 2); ?></strong>
-                                                        <small class="text-muted">(₱<?php echo number_format($order_item['unit_price'] ?? 0, 2); ?> × <?= $order_item['quantity'] ?>)</small>
+                                                        <?php $eff = isset($order_item['unit_price_effective']) ? (float)$order_item['unit_price_effective'] : (float)($order_item['unit_price'] ?? 0); ?>
+                                                        <strong class="text-success fs-6">₱<?php echo number_format(((int)$order_item['quantity']) * $eff, 2); ?></strong>
+                                                        <small class="text-muted">(₱<?php echo number_format($eff, 2); ?> × <?= (int)$order_item['quantity'] ?>)</small>
                                                     </div>
                                                 </td>
                                                 <td>Store Pickup</td>
@@ -1291,8 +1342,9 @@ $total_revenue = array_sum(array_map(function($o) {
                                                 </td>
                                                 <td>
                                                     <div class="d-flex flex-column">
-                                                        <strong class="text-success fs-6">₱<?php echo number_format($order_item['quantity'] * ($order_item['unit_price'] ?? 0), 2); ?></strong>
-                                                        <small class="text-muted">(₱<?php echo number_format($order_item['unit_price'] ?? 0, 2); ?> × <?= $order_item['quantity'] ?>)</small>
+                                                        <?php $eff = isset($order_item['unit_price_effective']) ? (float)$order_item['unit_price_effective'] : (float)($order_item['unit_price'] ?? 0); ?>
+                                                        <strong class="text-success fs-6">₱<?php echo number_format(((int)$order_item['quantity']) * $eff, 2); ?></strong>
+                                                        <small class="text-muted">(₱<?php echo number_format($eff, 2); ?> × <?= (int)$order_item['quantity'] ?>)</small>
                                                     </div>
                                                 </td>
                                                 <td><?php echo date('M j, Y', strtotime($order_item['order_date'])); ?></td>
@@ -1360,8 +1412,9 @@ $total_revenue = array_sum(array_map(function($o) {
                                                 </td>
                                                 <td>
                                                     <div class="d-flex flex-column">
-                                                        <strong class="text-success fs-6">₱<?php echo number_format($order_item['quantity'] * ($order_item['unit_price'] ?? 0), 2); ?></strong>
-                                                        <small class="text-muted">(₱<?php echo number_format($order_item['unit_price'] ?? 0, 2); ?> × <?= $order_item['quantity'] ?>)</small>
+                                                        <?php $eff = isset($order_item['unit_price_effective']) ? (float)$order_item['unit_price_effective'] : (float)($order_item['unit_price'] ?? 0); ?>
+                                                        <strong class="text-success fs-6">₱<?php echo number_format(((int)$order_item['quantity']) * $eff, 2); ?></strong>
+                                                        <small class="text-muted">(₱<?php echo number_format($eff, 2); ?> × <?= (int)$order_item['quantity'] ?>)</small>
                                                     </div>
                                                 </td>
                                                 <td><?php echo date('M j, Y', strtotime($order_item['order_date'])); ?></td>
@@ -1424,9 +1477,10 @@ $total_revenue = array_sum(array_map(function($o) {
                                                     <span class="badge bg-primary"><?php echo $order_item['quantity']; ?></span>
                                                 </td>
                                                 <td>
+                                                    <?php $eff = isset($order_item['unit_price_effective']) ? (float)$order_item['unit_price_effective'] : (float)($order_item['unit_price'] ?? 0); ?>
                                                     <div class="d-flex flex-column">
-                                                        <strong class="text-success fs-6">₱<?php echo number_format($order_item['quantity'] * ($order_item['unit_price'] ?? 0), 2); ?></strong>
-                                                        <small class="text-muted">(₱<?php echo number_format($order_item['unit_price'] ?? 0, 2); ?> × <?= $order_item['quantity'] ?>)</small>
+                                                        <strong class="text-success fs-6">₱<?php echo number_format(((int)$order_item['quantity']) * $eff, 2); ?></strong>
+                                                        <small class="text-muted">(₱<?php echo number_format($eff, 2); ?> × <?= (int)$order_item['quantity'] ?>)</small>
                                                     </div>
                                                 </td>
                                                 <td><?php echo date('M j, Y', strtotime($order_item['order_date'])); ?></td>

@@ -86,7 +86,11 @@ $current = basename($_SERVER['PHP_SELF']);
         <li class="nav-item">
           <a class="nav-link d-flex align-items-center <?= $current==='alerts.php' ? 'active' : '' ?>" href="alerts.php">
             <i class="bi bi-exclamation-triangle me-2"></i> Alerts
-            <span class="badge bg-danger ms-1" id="sidebarAlertBadge" style="display: <?= $unresolvedCount > 0 ? 'inline-block' : 'none' ?>;"><?= (int)$unresolvedCount ?></span>
+            <?php if ($unresolvedCount > 0): ?>
+              <span class="badge bg-danger ms-1" id="sidebarAlertBadge"><?= (int)$unresolvedCount ?></span>
+            <?php else: ?>
+              <span class="badge bg-danger ms-1" id="sidebarAlertBadge" style="display: none;"></span>
+            <?php endif; ?>
           </a>
         </li>
 
@@ -129,71 +133,3 @@ $current = basename($_SERVER['PHP_SELF']);
     </ul>
   </div>
 </nav>
-
-<script>
-// Auto-update alert badge on all admin pages
-(function() {
-    'use strict';
-    
-    function updateAlertBadge() {
-        const badge = document.getElementById('sidebarAlertBadge');
-        if (!badge) return;
-        
-        // Determine the correct path to ajax endpoint
-        const currentPath = window.location.pathname;
-        const isAdminPage = currentPath.includes('/admin/');
-        const ajaxUrl = isAdminPage ? 'ajax/get_alert_counts.php' : 'admin/ajax/get_alert_counts.php';
-        
-        // Use jQuery if available, otherwise fetch API
-        if (typeof $ !== 'undefined') {
-            $.ajax({
-                url: ajaxUrl,
-                method: 'GET',
-                dataType: 'json',
-                cache: false,
-                success: function(response) {
-                    if (response.success) {
-                        const count = parseInt(response.active_stock_alerts || 0);
-                        if (count > 0) {
-                            badge.textContent = count;
-                            badge.style.display = 'inline-block';
-                        } else {
-                            badge.style.display = 'none';
-                        }
-                    }
-                },
-                error: function() {
-                    // Silently fail - badge will show initial count
-                }
-            });
-        } else {
-            fetch(ajaxUrl)
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        const count = parseInt(data.active_stock_alerts || 0);
-                        if (count > 0) {
-                            badge.textContent = count;
-                            badge.style.display = 'inline-block';
-                        } else {
-                            badge.style.display = 'none';
-                        }
-                    }
-                })
-                .catch(() => {
-                    // Silently fail - badge will show initial count
-                });
-        }
-    }
-    
-    // Update on page load
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', updateAlertBadge);
-    } else {
-        updateAlertBadge();
-    }
-    
-    // Update every 30 seconds
-    setInterval(updateAlertBadge, 30000);
-})();
-</script>

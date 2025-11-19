@@ -125,12 +125,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 
                 if ($user->create($username, $finalPassword, $role, $email, $phone, $first_name, $middle_name, $last_name, $address, $city, $province, $postal_code, $profile_picture)) {
-                    // Clear Google registration data if it was used
                     if (isset($_SESSION['google_register_data'])) {
                         unset($_SESSION['google_register_data']);
                     }
-                    
-                    $register_success = "Registration successful! You can now login with your " . ucfirst($role) . " account.";
+                    $base = defined('APP_BASE') ? APP_BASE : '';
+                    if ($base === '/' || $base === '\\') $base = '';
+                    $loginPath = $role === 'management' ? '/admin/login.php' : ($role === 'supplier' ? '/supplier/login.php' : '/staff/login.php');
+                    header('Location: ' . $base . $loginPath . '?success=1');
+                    exit;
                 } else {
                     $register_error = "Registration failed. Please check the error logs or try again.";
                 }

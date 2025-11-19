@@ -73,6 +73,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $report_type = $_POST['report_type'] ?: $report_type;
     }
     
+    
 }
 
 $message = $message ?? '';
@@ -253,6 +254,11 @@ if (isset($_POST['export_csv'])) {
       .dropdown-menu,
       form,
       .alert,
+      #selectAllReports,
+      label[for="selectAllReports"],
+      #deleteSelectedBtn,
+      th:first-child,
+      td:first-child,
       .dataTables_wrapper .dataTables_filter,
       .dataTables_wrapper .dataTables_length,
       .dataTables_wrapper .dataTables_info,
@@ -298,6 +304,7 @@ if (isset($_POST['export_csv'])) {
         <div class="d-flex justify-content-between align-items-center mb-3 border-bottom no-print">
           <h1 class="h2">Reports</h1>
           <div class="btn-toolbar">
+            
             <div class="btn-group me-2">
               <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown">
                 <i class="bi bi-funnel"></i> Filter
@@ -345,10 +352,12 @@ if (isset($_POST['export_csv'])) {
 
         <?php if ($report_data): ?>
           <input type="hidden" id="currentReportType" value="<?= htmlspecialchars($report_type) ?>">
+          
           <div class="table-responsive">
             <table id="report_table" class="table table-striped table-bordered">
               <thead>
                 <tr>
+                  
                   <?php if ($report_type==='sales'): ?>
                     <th>Date</th>
                     <th>Item Name</th>
@@ -400,6 +409,7 @@ if (isset($_POST['export_csv'])) {
               <tbody>
                 <?php foreach($report_data as $r): ?>
                   <tr>
+                    <td><span class="text-muted">—</span></td>
                     <?php if ($report_type==='sales'): ?>
                       <?php 
                         // Get unit_types and variations directly from sales report query
@@ -484,6 +494,7 @@ if (isset($_POST['export_csv'])) {
   <script src="https://cdn.datatables.net/1.11.5/js/jquery.dataTables.min.js"></script>
   <script src="https://cdn.datatables.net/1.11.5/js/dataTables.bootstrap5.min.js"></script>
   <script>
+    
     $(function(){
       $('#report_table').DataTable({
         dom: 'Bfrtip',

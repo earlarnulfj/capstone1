@@ -51,6 +51,12 @@ function formatVariationForDisplay($variation) {
     return implode(' - ', $values);
 }
 
+// Truncate product name for receipt display
+function truncateProductName($name, $maxLength = 25) {
+    if (strlen($name) <= $maxLength) return $name;
+    return substr($name, 0, $maxLength - 3) . '...';
+}
+
 // Format variation with labels (same as orders.php)
 function formatVariationWithLabels($variation) {
     if (empty($variation)) return '';
@@ -153,7 +159,6 @@ try {
                  LEFT JOIN suppliers s ON o.supplier_id = s.id
                  WHERE o.confirmation_status = 'completed'
                    AND o.inventory_id IS NOT NULL
-                   AND COALESCE(i.is_deleted, 0) = 0
                  ORDER BY COALESCE(i.name, CONCAT('Product #', o.inventory_id)) ASC";
     
     // Execute query without caching to ensure we get the absolute latest data including new orders
@@ -489,6 +494,7 @@ usort($categories, fn($a,$b) => strcasecmp($a['label'],$b['label']));
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
   <link href="../assets/css/style.css" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Libre+Barcode+128&display=swap" rel="stylesheet">
   <style>
     /* POS-specific styles */
     .product-card { 
@@ -587,6 +593,189 @@ usort($categories, fn($a,$b) => strcasecmp($a['label'],$b['label']));
       align-items: center;
       justify-content: center;
       font-size: 0.875rem;
+    }
+    
+    /* Receipt Print Styles for Thermal Printers */
+    @media print {
+      /* Hide everything except receipt content */
+      body * {
+        visibility: hidden;
+      }
+      
+      #receiptContent, #receiptContent * {
+        visibility: visible;
+      }
+      
+      #receiptContent {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 80mm;
+        margin: 0;
+        padding: 2mm;
+        font-family: 'Courier New', 'Lucida Console', monospace;
+        font-size: 10pt;
+        line-height: 1.2;
+      }
+      
+      /* Receipt container styling */
+      .receipt-container {
+        width: 76mm;
+        margin: 0 auto;
+        background: white;
+      }
+      
+      /* Store header styling */
+      .receipt-header {
+        text-align: center;
+        margin-bottom: 3mm;
+        border-bottom: 1px dashed #000;
+        padding-bottom: 2mm;
+      }
+      
+      .receipt-header h4 {
+        font-size: 12pt;
+        font-weight: bold;
+        margin: 1mm 0;
+      }
+      
+      .receipt-header p {
+        font-size: 9pt;
+        margin: 0.5mm 0;
+      }
+      
+      /* Transaction details */
+      .receipt-details {
+        margin-bottom: 3mm;
+      }
+      
+      .receipt-details p {
+        margin: 0.5mm 0;
+        display: flex;
+        justify-content: space-between;
+      }
+      
+      .receipt-details strong {
+        font-weight: normal;
+      }
+      
+      /* Items table styling */
+      .receipt-items {
+        margin-bottom: 3mm;
+        border-bottom: 1px dashed #000;
+        padding-bottom: 2mm;
+      }
+      
+      .receipt-items table {
+        width: 100%;
+        border-collapse: collapse;
+        font-family: 'Courier New', 'Lucida Console', monospace;
+      }
+      
+      .receipt-items th,
+      .receipt-items td {
+        padding: 0.5mm 0;
+        vertical-align: top;
+      }
+      
+      .receipt-items th {
+        font-weight: bold;
+        border-bottom: 1px solid #000;
+      }
+      
+      /* Column widths for proper alignment */
+      .col-item {
+        width: 35mm;
+        text-align: left;
+      }
+      
+      .col-qty {
+        width: 8mm;
+        text-align: center;
+      }
+      
+      .col-price {
+        width: 15mm;
+        text-align: right;
+      }
+      
+      .col-total {
+        width: 18mm;
+        text-align: right;
+      }
+      
+      /* Item name and variation styling */
+      .item-name {
+        font-weight: normal;
+        margin: 0;
+        word-wrap: break-word;
+        max-width: 35mm;
+      }
+      
+      .item-variation {
+        font-size: 8pt;
+        color: #666;
+        margin: 0;
+        font-style: italic;
+      }
+      
+      /* Totals section */
+      .receipt-totals {
+        margin-bottom: 3mm;
+      }
+      
+      .receipt-totals div {
+        display: flex;
+        justify-content: space-between;
+        margin: 0.5mm 0;
+      }
+      
+      .receipt-totals strong {
+        font-weight: bold;
+      }
+      
+      /* Footer styling */
+      .receipt-footer {
+        text-align: center;
+        margin-top: 5mm;
+        padding-top: 2mm;
+        border-top: 1px dashed #000;
+      }
+      
+      .receipt-footer p {
+        margin: 1mm 0;
+        font-size: 9pt;
+      }
+      
+      /* Barcode/QR code placeholder */
+      .receipt-barcode {
+        text-align: center;
+        margin: 3mm 0;
+        font-family: 'Libre Barcode 128', monospace;
+        font-size: 24pt;
+      }
+      
+      /* Ensure proper page breaks */
+      @page {
+        size: 80mm auto;
+        margin: 0;
+      }
+      
+      /* Prevent cutting off content */
+      .receipt-container {
+        page-break-inside: avoid;
+      }
+    }
+    
+    /* Screen preview styling */
+    .receipt-preview {
+      background: white;
+      border: 1px solid #ccc;
+      padding: 10px;
+      margin: 10px auto;
+      max-width: 300px;
+      font-family: 'Courier New', 'Lucida Console', monospace;
+      font-size: 10pt;
     }
     .quantity-controls input {
       width: 4.5rem;
@@ -1011,6 +1200,15 @@ usort($categories, fn($a,$b) => strcasecmp($a['label'],$b['label']));
     </div>
   </div>
 
+  <script>
+  try {
+    window.addEventListener('storage', function(e){
+      if (e && e.key === 'inventory_last_update') {
+        try { location.reload(); } catch(_) {}
+      }
+    });
+  } catch(_) {}
+  </script>
   <!-- Toast container -->
   <div class="toast-container position-fixed top-0 end-0 p-3" id="posToastContainer"></div>
 
@@ -1057,26 +1255,56 @@ usort($categories, fn($a,$b) => strcasecmp($a['label'],$b['label']));
         </div>
         <div class="modal-body">
           <div id="receiptContent" class="p-3">
-            <div class="text-center mb-4">
-              <h4>Hardware Store</h4>
-              <p>Talisay City</p>
-              <p>Tel: 123-456-7890</p>
+            <div class="receipt-container">
+              <div class="receipt-header">
+                <h4>Hardware Store</h4>
+                <p>Talisay City</p>
+                <p>Tel: 123-456-7890</p>
+              </div>
+              
+              <div class="receipt-details">
+                <p><span>Date:</span> <span id="receiptDate"></span></p>
+                <p><span>Cashier:</span> <span><?= htmlspecialchars($_SESSION['admin']['username'] ?? 'Admin') ?></span></p>
+                <p><span>Receipt #:</span> <span id="receiptNumber"><?= date('YmdHis') ?></span></p>
+              </div>
+              
+              <div class="receipt-items">
+                <table>
+                  <thead>
+                    <tr>
+                      <th class="col-item">Item</th>
+                      <th class="col-qty">Qty</th>
+                      <th class="col-price">Price</th>
+                      <th class="col-total">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody id="receiptItemsBody">
+                  </tbody>
+                </table>
+              </div>
+              
+              <div class="receipt-totals">
+                <div><span>Subtotal:</span> <span>₱<span id="receiptSubtotal"></span></span></div>
+                <div><span>Total:</span> <span>₱<span id="receiptTotal"></span></span></div>
+                <div><span>Amount Received:</span> <span>₱<span id="receiptAmountReceived"></span></span></div>
+                <div><span>Change:</span> <span>₱<span id="receiptChange"></span></span></div>
+              </div>
+              
+              <div class="receipt-barcode" id="receiptBarcode">
+                <?= date('YmdHis') ?>
+              </div>
+              
+              <div class="receipt-footer">
+                <p>Thank you for your purchase!</p>
+                <p>Please come again</p>
+                <p>VAT Registered</p>
+              </div>
             </div>
-            <p><strong>Date:</strong> <span id="receiptDate"></span></p>
-            <p><strong>Cashier:</strong> <?= htmlspecialchars($_SESSION['admin']['username'] ?? 'Admin') ?></p>
-            <h6>Items</h6>
-            <div id="receiptItems" class="mb-3"></div>
-            <div class="border-top pt-2">
-              <div class="d-flex justify-content-between"><strong>Subtotal:</strong><span id="receiptSubtotal"></span></div>
-              <div class="d-flex justify-content-between"><strong>Total:</strong><span id="receiptTotal"></span></div>
-              <div class="d-flex justify-content-between"><strong>Amount Received:</strong><span id="receiptAmountReceived"></span></div>
-              <div class="d-flex justify-content-between"><strong>Change:</strong><span id="receiptChange"></span></div>
-            </div>
-            <p class="text-center mt-4">Thank you for your purchase!</p>
           </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+          <button id="printPreviewBtn" class="btn btn-info">Print Preview</button>
           <button id="printBtn" class="btn btn-primary">Print</button>
         </div>
       </div>
@@ -1180,6 +1408,11 @@ usort($categories, fn($a,$b) => strcasecmp($a['label'],$b['label']));
     }
 
     function escapeHtml(str){ return $('<div>').text(str).html(); }
+    
+    function truncateProductName(name, maxLength = 25) {
+      if (name.length <= maxLength) return name;
+      return name.substring(0, maxLength - 3) + '...';
+    }
 
     // Handle PHP-rendered dropdown (variation-select-ordered) from orders
     // When variation is selected, ALIGN stock and price immediately
@@ -1691,54 +1924,64 @@ usort($categories, fn($a,$b) => strcasecmp($a['label'],$b['label']));
           const tot = resp.total_amount,
                 pay = +$('#paymentAmount').val();
           $('#receiptDate').text(new Date().toLocaleString());
-          let html = `
-            <div class="table-responsive">
-              <table class="table table-sm table-striped">
-                <thead class="table-dark">
-                  <tr>
-                    <th>Item</th>
-                    <th class="text-center">Qty</th>
-                    <th class="text-end">Price</th>
-                    <th class="text-end">Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-          `;
+          let html = '';
           cart.forEach(item => {
             const lineTotal = (item.price || 0) * (item.quantity || 0);
+            const itemName = truncateProductName(escapeHtml(item.name || 'Unknown Item'));
+            const variationText = item.variation ? formatVariationForDisplay(item.variation) : '';
+            
             html += `
               <tr>
-                <td>
-                  <strong>${escapeHtml(item.name || 'Unknown Item')}</strong>
-                  <br><small class="text-muted">${item.variation ? formatVariationForDisplay(item.variation) : 'No variation'}</small>
+                <td class="col-item">
+                  <div class="item-name">${itemName}</div>
+                  ${variationText ? `<div class="item-variation">${variationText}</div>` : ''}
                 </td>
-                <td class="text-center">
-                  <span class="badge bg-primary">${item.quantity || 0}</span>
-                </td>
-                <td class="text-end">₱${(item.price || 0).toFixed(2)}</td>
-                <td class="text-end"><strong>₱${lineTotal.toFixed(2)}</strong></td>
+                <td class="col-qty">${item.quantity || 0}</td>
+                <td class="col-price">${(item.price || 0).toFixed(2)}</td>
+                <td class="col-total">${lineTotal.toFixed(2)}</td>
               </tr>
             `;
           });
+          
+          // Add totals row
           html += `
-                </tbody>
-                <tfoot class="table-dark">
-                  <tr>
-                    <th colspan="3" class="text-end">Total Amount:</th>
-                    <th class="text-end">₱${tot.toFixed(2)}</th>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
+            <tr style="border-top: 1px solid #000;">
+              <td colspan="3" style="text-align: right; font-weight: bold;">TOTAL:</td>
+              <td class="col-total" style="font-weight: bold;">${tot.toFixed(2)}</td>
+            </tr>
           `;
-          $('#receiptItems').html(html);
-          $('#receiptSubtotal,#receiptTotal').text(`₱${tot.toFixed(2)}`);
-          $('#receiptAmountReceived').text(`₱${pay.toFixed(2)}`);
-          $('#receiptChange').text(`₱${(pay-tot).toFixed(2)}`);
+          
+          $('#receiptItemsBody').html(html);
+          $('#receiptSubtotal,#receiptTotal').text(`${tot.toFixed(2)}`);
+          $('#receiptAmountReceived').text(`${pay.toFixed(2)}`);
+          $('#receiptChange').text(`${(pay-tot).toFixed(2)}`);
+          
+          // Update receipt number and barcode
+          const receiptNumber = '<?= date('YmdHis') ?>' + Math.floor(Math.random() * 1000);
+          $('#receiptNumber').text(receiptNumber);
+          $('#receiptBarcode').text(receiptNumber);
           receiptModal.show();
 
-          lastReceiptHTML = $('#receiptContent').html();
-          cart=[]; updateCart();
+        lastReceiptHTML = $('#receiptContent').html();
+        cart=[]; updateCart();
+
+          $.ajax({
+            url: 'ajax/get_alert_counts.php',
+            method: 'GET',
+            dataType: 'json'
+          }).done(function(r){
+            var c = parseInt((r && (r.active_stock_alerts||r.total_alerts||0)) ,10) || 0;
+            var $b = $('#sidebarAlertBadge');
+            if(c>0){
+              if($b.length===0){
+                $('a[href="alerts.php"]').append('<span class="badge bg-danger ms-1" id="sidebarAlertBadge">'+c+'</span>');
+              } else {
+                $b.text(c).show();
+              }
+            } else if($b.length){
+              $b.hide();
+            }
+          });
         } else {
           showToast(resp.message,'danger');
         }
@@ -1747,14 +1990,94 @@ usort($categories, fn($a,$b) => strcasecmp($a['label'],$b['label']));
       });
     });
 
+    // Print Preview
+    $('#printPreviewBtn').click(function(){
+      const receiptHTML = $('#receiptContent').html();
+      const previewWindow = window.open('', '_blank', 'width=350,height=600,scrollbars=yes,resizable=yes');
+      previewWindow.document.write(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Receipt Preview</title>
+          <style>
+            body { 
+              font-family: 'Courier New', monospace; 
+              margin: 0; 
+              padding: 10px; 
+              width: 300px;
+              font-size: 10pt;
+            }
+            .receipt-header { text-align: center; margin-bottom: 10px; }
+            .receipt-header h4 { margin: 2px 0; font-size: 12pt; }
+            .receipt-header p { margin: 1px 0; font-size: 9pt; }
+            .receipt-details p { margin: 2px 0; display: flex; justify-content: space-between; }
+            .receipt-items table { width: 100%; border-collapse: collapse; }
+            .receipt-items th, .receipt-items td { text-align: left; padding: 1px 0; font-size: 9pt; }
+            .receipt-items th { border-bottom: 1px solid #000; }
+            .col-item { width: 120px; }
+            .col-qty { width: 25px; text-align: center; }
+            .col-price { width: 50px; text-align: right; }
+            .col-total { width: 60px; text-align: right; }
+            .item-name { font-weight: normal; }
+            .item-variation { font-size: 8pt; color: #666; }
+            .receipt-totals div { display: flex; justify-content: space-between; margin: 2px 0; }
+            .receipt-footer { text-align: center; margin-top: 15px; padding-top: 10px; border-top: 1px dashed #000; }
+            .receipt-barcode { text-align: center; margin: 10px 0; font-family: 'Libre Barcode 128', monospace; font-size: 20pt; }
+          </style>
+        </head>
+        <body>
+          ${receiptHTML}
+        </body>
+        </html>
+      `);
+      previewWindow.document.close();
+    });
+
     // Print
     $('#printBtn').click(function(){
-      const c = $('#receiptContent').html(),
-            o = $('body').html();
-      $('body').html(c);
-      window.print();
-      $('body').html(o);
-      location.reload();
+      const receiptContent = $('#receiptContent').html();
+      const printWindow = window.open('', '_blank', 'width=350,height=600');
+      printWindow.document.write(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Receipt</title>
+          <style>
+            @media print {
+              body { 
+                width: 80mm; 
+                margin: 0; 
+                padding: 2mm;
+                font-family: 'Courier New', monospace;
+                font-size: 10pt;
+              }
+              .receipt-header { text-align: center; margin-bottom: 3mm; }
+              .receipt-header h4 { margin: 1mm 0; font-size: 12pt; }
+              .receipt-header p { margin: 0.5mm 0; font-size: 9pt; }
+              .receipt-details p { margin: 0.5mm 0; display: flex; justify-content: space-between; }
+              .receipt-items table { width: 100%; border-collapse: collapse; }
+              .receipt-items th, .receipt-items td { padding: 0.5mm 0; font-size: 9pt; }
+              .receipt-items th { border-bottom: 1px solid #000; }
+              .col-item { width: 35mm; }
+              .col-qty { width: 8mm; text-align: center; }
+              .col-price { width: 15mm; text-align: right; }
+              .col-total { width: 18mm; text-align: right; }
+              .item-name { font-weight: normal; word-wrap: break-word; max-width: 35mm; overflow-wrap: break-word; }
+              .item-variation { font-size: 8pt; color: #666; }
+              .receipt-totals div { display: flex; justify-content: space-between; margin: 0.5mm 0; }
+              .receipt-footer { text-align: center; margin-top: 5mm; padding-top: 2mm; border-top: 1px dashed #000; }
+              .receipt-barcode { text-align: center; margin: 3mm 0; font-family: 'Libre Barcode 128', monospace; font-size: 24pt; }
+              @page { size: 80mm auto; margin: 0; }
+            }
+          </style>
+        </head>
+        <body>
+          ${receiptContent}
+        </body>
+        </html>
+      `);
+      printWindow.document.close();
+      printWindow.print();
     });
 
     $('#printReceiptBtn').click(function(){
@@ -1834,6 +2157,30 @@ usort($categories, fn($a,$b) => strcasecmp($a['label'],$b['label']));
       });
     });
   });
+  </script>
+  <script>
+    (function(){
+      function refreshAlertBadge(){
+        $.ajax({
+          url: 'ajax/get_alert_counts.php',
+          method: 'GET',
+          dataType: 'json'
+        }).done(function(r){
+          var c = parseInt((r && (r.active_stock_alerts||r.total_alerts||0)) ,10) || 0;
+          var $b = $('#sidebarAlertBadge');
+          if(c>0){
+            if($b.length===0){
+              $('a[href="alerts.php"]').append('<span class="badge bg-danger ms-1" id="sidebarAlertBadge">'+c+'</span>');
+            } else {
+              $b.text(c).show();
+            }
+          } else if($b.length){
+            $b.hide();
+          }
+        });
+      }
+      setInterval(refreshAlertBadge,30000);
+    })();
   </script>
   <script src="../js/i18n.js"></script>
 </body>

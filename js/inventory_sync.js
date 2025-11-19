@@ -28,9 +28,12 @@
           const now = Date.now();
           // Debounce reloads to avoid loops
           if (now - lastReloadAt > 8000) {
+            console.info('[inventory_sync] Change detected. Reloading to apply updates...');
             lastReloadAt = now;
             // Prefer a soft refresh for cache busting
             window.location.reload();
+          } else {
+            console.info('[inventory_sync] Change detected but reload debounced.');
           }
         }
       })

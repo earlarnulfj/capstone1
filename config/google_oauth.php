@@ -20,8 +20,8 @@ require_once __DIR__ . '/app.php';
 // 2. Copy the Client ID (already set below)
 // 3. Click "Show" next to Client Secret and copy the full secret
 // 4. Replace 'YOUR_GOOGLE_CLIENT_SECRET_HERE' below with your actual secret
-define('GOOGLE_CLIENT_ID', getenv('GOOGLE_CLIENT_ID') ?: '975310801467-t2lbct4ga4ahbnn7usvof655ubnh0em2.apps.googleusercontent.com');
-define('GOOGLE_CLIENT_SECRET', getenv('GOOGLE_CLIENT_SECRET') ?: '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');
+define('GOOGLE_CLIENT_ID', getenv('GOOGLE_CLIENT_ID') ?: '');
+define('GOOGLE_CLIENT_SECRET', getenv('GOOGLE_CLIENT_SECRET') ?: '');
 
 // Build redirect URI dynamically - this is a fallback, but should be overridden by environment variable
 // The actual redirect URI should be set in Google Cloud Console and match exactly

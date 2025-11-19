@@ -45,6 +45,23 @@ $payment = new Payment($db);
 $admin_id = $_SESSION['admin']['user_id'];
 $admin_name = $_SESSION['admin']['username'] ?? 'Admin';
 
+// Admin action: clear all deliveries
+if (isset($_GET['action']) && $_GET['action'] === 'clear_all') {
+    try {
+        $db->beginTransaction();
+        $deleted = $db->exec("DELETE FROM deliveries");
+        $db->commit();
+        $_SESSION['deliveries_clear_message'] = "Removed " . (int)$deleted . " delivery record(s).";
+        $_SESSION['deliveries_clear_message_type'] = 'success';
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) { $db->rollBack(); }
+        $_SESSION['deliveries_clear_message'] = 'Error removing deliveries: ' . $e->getMessage();
+        $_SESSION['deliveries_clear_message_type'] = 'danger';
+    }
+    header('Location: deliveries.php');
+    exit();
+}
+
 // Handle AJAX requests for status updates
 if (isset($_POST['action'])) {
     header('Content-Type: application/json');
@@ -437,6 +454,13 @@ $total_revenue = array_sum(array_map(function($o) {
 
             <!-- Main content -->
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
+                <?php if (!empty($_SESSION['deliveries_clear_message'])): ?>
+                    <div class="alert alert-<?= htmlspecialchars($_SESSION['deliveries_clear_message_type'] ?? 'info') ?> alert-dismissible fade show" role="alert">
+                        <?= htmlspecialchars($_SESSION['deliveries_clear_message']) ?>
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                    <?php $_SESSION['deliveries_clear_message'] = null; $_SESSION['deliveries_clear_message_type'] = null; ?>
+                <?php endif; ?>
                 <div class="d-flex justify-content-between align-items-center pt-3 pb-2 mb-3 border-bottom">
                     <h1 class="h2">
                         <i class="bi bi-geo-alt me-2"></i>Deliveries
@@ -444,6 +468,9 @@ $total_revenue = array_sum(array_map(function($o) {
                     <div class="btn-toolbar mb-2 mb-md-0">
                         <button type="button" class="btn btn-sm btn-outline-secondary me-2" onclick="refreshData()">
                             <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+                        </button>
+                        <button type="button" class="btn btn-sm btn-outline-danger" onclick="if(confirm('Delete all delivery records? This cannot be undone.')) location.href='?action=clear_all'">
+                            <i class="bi bi-trash me-1"></i>Clear All Deliveries
                         </button>
                     </div>
                 </div>

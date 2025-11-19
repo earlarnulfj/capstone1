@@ -1727,6 +1727,24 @@ usort($categories, fn($a,$b) => strcasecmp($a['label'],$b['label']));
 
           lastReceiptHTML = $('#receiptContent').html();
           cart=[]; updateCart();
+
+          $.ajax({
+            url: '../admin/ajax/get_alert_counts.php',
+            method: 'GET',
+            dataType: 'json'
+          }).done(function(r){
+            var c = parseInt((r && (r.active_stock_alerts||r.total_alerts||0)) ,10) || 0;
+            var $b = $('#sidebarAlertBadge');
+            if(c>0){
+              if($b.length===0){
+                $('a[href="../admin/alerts.php"]').append('<span class="badge bg-danger ms-1" id="sidebarAlertBadge">'+c+'</span>');
+              } else {
+                $b.text(c).show();
+              }
+            } else if($b.length){
+              $b.hide();
+            }
+          });
         } else {
           showToast(resp.message,'danger');
         }
@@ -1787,6 +1805,30 @@ usort($categories, fn($a,$b) => strcasecmp($a['label'],$b['label']));
       logoutLink.setAttribute('href', currentHref + separator + 'token=' + encodeURIComponent(storedToken));
     }
   })();
+  </script>
+  <script>
+    (function(){
+      function refreshAlertBadge(){
+        $.ajax({
+          url: '../admin/ajax/get_alert_counts.php',
+          method: 'GET',
+          dataType: 'json'
+        }).done(function(r){
+          var c = parseInt((r && (r.active_stock_alerts||r.total_alerts||0)) ,10) || 0;
+          var $b = $('#sidebarAlertBadge');
+          if(c>0){
+            if($b.length===0){
+              $('a[href="../admin/alerts.php"]').append('<span class="badge bg-danger ms-1" id="sidebarAlertBadge">'+c+'</span>');
+            } else {
+              $b.text(c).show();
+            }
+          } else if($b.length){
+            $b.hide();
+          }
+        });
+      }
+      setInterval(refreshAlertBadge,30000);
+    })();
   </script>
   <script src="../js/i18n.js"></script>
 </body>

@@ -148,11 +148,45 @@ try {
         exit;
     }
 
-    // Step 3: Check order status (for logging and inventory reversal)
+    // Step 3: Check if order can be deleted (business rules)
     $confirmation_status = $orderDetails['confirmation_status'] ?? 'pending';
     
-    // Note: We allow deletion of completed orders, but will properly reverse inventory stock
-    // The inventory reversal logic below handles this correctly
+    // Prevent deletion of completed orders (they affect inventory)
+    if ($confirmation_status === 'completed') {
+        // Check if order has deliveries that were delivered
+        $deliveryCheck = $db->prepare("
+            SELECT COUNT(*) as delivered_count
+            FROM deliveries 
+            WHERE order_id = ? 
+            AND status IN ('delivered', 'completed')
+        ");
+        $deliveryCheck->execute([$order_id]);
+        $deliveredCount = (int)$deliveryCheck->fetchColumn();
+        
+        if ($deliveredCount > 0) {
+            audit_log_event($db, 'order_deletion_attempt', 'order', $order_id, 'rejected', false,
+                "Cannot delete completed order with delivered items. Delivered count: {$deliveredCount}",
+                [
+                    'source' => 'admin_ui',
+                    'target' => 'admin_orders',
+                    'order_id' => $order_id,
+                    'user_id' => $user_id,
+                    'username' => $username,
+                    'status_before' => $confirmation_status
+                ]
+            );
+            
+            ob_clean();
+            http_response_code(403);
+            echo json_encode([
+                'success' => false,
+                'message' => 'Cannot delete completed orders that have been delivered. Cancel the order before deletion if needed.',
+                'error_code' => 'COMPLETED_ORDER_RESTRICTION'
+            ]);
+            ob_end_flush();
+            exit;
+        }
+    }
 
     // Step 4: Check for related deliveries
     $deliveryStmt = $db->prepare("SELECT COUNT(*) FROM deliveries WHERE order_id = ?");
@@ -188,24 +222,7 @@ try {
         $unit_type = !empty($orderDetails['unit_type']) ? trim($orderDetails['unit_type']) : 'per piece';
         $order_status = $orderDetails['confirmation_status'] ?? 'pending';
 
-        // Step 7: Delete all related deliveries (pending, in_transit, cancelled, delivered, completed)
-        // This ensures we can delete orders regardless of delivery status
-        // CRITICAL: This allows deletion of completed orders with delivered items
-        try {
-            $deleteDelStmt = $db->prepare("DELETE FROM deliveries WHERE order_id = ?");
-            $deleteDelStmt->execute([$order_id]);
-            $deletedDeliveries = $deleteDelStmt->rowCount();
-            if ($deletedDeliveries > 0) {
-                error_log("Deleted {$deletedDeliveries} delivery(ies) for order #{$order_id} (all statuses)");
-            }
-        } catch (Exception $e) {
-            error_log("Warning: Could not delete deliveries for order #{$order_id}: " . $e->getMessage());
-            // Continue with deletion even if deliveries can't be deleted
-        }
-        
-        // Step 8: Handle inventory reversal if order was completed
-        // CRITICAL: Reverse inventory stock that was added when order was completed
-        // This ensures inventory accuracy when deleting completed orders
+        // Step 7: Handle inventory reversal if order was completed
         if ($order_status === 'completed' && $inventory_id > 0) {
             if ($variation) {
                 // Decrement stock for this variation
@@ -218,12 +235,10 @@ try {
                     if ($newQty > 0) {
                         $updateVarStmt = $db->prepare("UPDATE inventory_variations SET quantity = ? WHERE id = ?");
                         $updateVarStmt->execute([$newQty, (int)$existingVar['id']]);
-                        error_log("Reversed inventory stock for variation '{$variation}': Reduced by {$order_quantity} (new qty: {$newQty})");
                     } else {
                         // If stock reaches 0, delete the variation record
                         $deleteVarStmt = $db->prepare("DELETE FROM inventory_variations WHERE id = ?");
                         $deleteVarStmt->execute([(int)$existingVar['id']]);
-                        error_log("Deleted inventory variation '{$variation}' (stock reached 0 after reversal)");
                     }
                 }
             } else {
@@ -236,12 +251,11 @@ try {
                     $newQty = max(0, (int)$existingInv['quantity'] - $order_quantity);
                     $updateStmt = $db->prepare("UPDATE inventory SET quantity = ? WHERE id = ?");
                     $updateStmt->execute([$newQty, $inventory_id]);
-                    error_log("Reversed inventory stock for inventory_id {$inventory_id}: Reduced by {$order_quantity} (new qty: {$newQty})");
                 }
             }
         }
 
-        // Step 9: Delete related notifications
+        // Step 8: Delete related notifications
         try {
             $notifStmt = $db->prepare("DELETE FROM notifications WHERE order_id = ?");
             $notifStmt->execute([$order_id]);
@@ -250,7 +264,7 @@ try {
             error_log("Note: Could not delete notifications for order {$order_id}: " . $e->getMessage());
         }
 
-        // Step 10: Delete the order from admin_orders table
+        // Step 9: Delete the order from admin_orders table
         $deleteStmt = $db->prepare("DELETE FROM admin_orders WHERE id = ?");
         $deleteResult = $deleteStmt->execute([$order_id]);
         $rowsDeleted = $deleteStmt->rowCount();
@@ -260,7 +274,7 @@ try {
             throw new Exception("DELETE query execution failed. Error: " . ($errorInfo[2] ?? 'Unknown error'));
         }
 
-        // Step 11: Verify deletion was successful
+        // Step 10: Verify deletion was successful
         $verifyStmt = $db->prepare("SELECT COUNT(*) FROM admin_orders WHERE id = ?");
         $verifyStmt->execute([$order_id]);
         $stillExists = (int)$verifyStmt->fetchColumn();
@@ -269,10 +283,10 @@ try {
             throw new Exception("Order deletion failed verification. Order still exists in database.");
         }
 
-        // Step 12: Commit transaction
+        // Step 11: Commit transaction
         $db->commit();
 
-        // Step 13: Comprehensive logging after successful deletion
+        // Step 12: Comprehensive logging after successful deletion
         $logMessage = sprintf(
             "Order #%d deleted successfully by user #%d (%s). Details: Item: %s, Quantity: %d, Status: %s, Supplier: %s, Variation: %s, Unit Type: %s, Unit Price: %s, Order Date: %s, Delivery Count: %d",
             $order_id,
@@ -302,7 +316,7 @@ try {
             'timestamp' => date('Y-m-d H:i:s')
         ]);
 
-        // Step 14: Return success response
+        // Step 13: Return success response
         ob_clean();
         echo json_encode([
             'success' => true,

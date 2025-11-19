@@ -2,6 +2,7 @@
 session_start();
 require_once '../config/database.php';
 require_once '../models/order.php';
+require_once '../models/inventory_variation.php';
 require_once '../models/notification.php';
 
 // Check if user is logged in as supplier
@@ -310,89 +311,6 @@ if (isset($_POST['action'])) {
             }
             exit();
             
-        case 'bulk_delete':
-            // Bulk DELETE orders from database (permanent deletion)
-            try {
-                $order_ids = $_POST['order_ids'] ?? [];
-                if (empty($order_ids) || !is_array($order_ids)) {
-                    echo json_encode(['success' => false, 'message' => 'No orders selected for deletion.']);
-                    exit();
-                }
-                
-                // Validate all orders belong to this supplier
-                $valid_ids = [];
-                foreach ($order_ids as $oid) {
-                    $oid = (int)$oid;
-                    if ($oid > 0) {
-                        $checkStmt = $db->prepare("SELECT id FROM orders WHERE id = ? AND supplier_id = ? LIMIT 1");
-                        $checkStmt->execute([$oid, $supplier_id]);
-                        if ($checkStmt->fetchColumn()) {
-                            $valid_ids[] = $oid;
-                        }
-                    }
-                }
-                
-                if (empty($valid_ids)) {
-                    echo json_encode(['success' => false, 'message' => 'No valid orders selected for deletion.']);
-                    exit();
-                }
-                
-                $db->beginTransaction();
-                $deleted_count = 0;
-                
-                foreach ($valid_ids as $order_id) {
-                    try {
-                        // Delete related records first (to handle foreign key constraints)
-                        // 1. Delete notifications related to this order
-                        try {
-                            $delNotifStmt = $db->prepare("DELETE FROM notifications WHERE order_id = ?");
-                            $delNotifStmt->execute([$order_id]);
-                        } catch (Exception $e) {
-                            error_log("Warning: Could not delete notifications for order #{$order_id}: " . $e->getMessage());
-                        }
-                        
-                        // 2. Delete deliveries related to this order
-                        try {
-                            $delDelivStmt = $db->prepare("DELETE FROM deliveries WHERE order_id = ?");
-                            $delDelivStmt->execute([$order_id]);
-                        } catch (Exception $e) {
-                            error_log("Warning: Could not delete deliveries for order #{$order_id}: " . $e->getMessage());
-                        }
-                        
-                        // 3. Delete payments related to this order
-                        try {
-                            $delPayStmt = $db->prepare("DELETE FROM payments WHERE order_id = ?");
-                            $delPayStmt->execute([$order_id]);
-                        } catch (Exception $e) {
-                            error_log("Warning: Could not delete payments for order #{$order_id}: " . $e->getMessage());
-                        }
-                        
-                        // 4. Delete the order itself from orders table
-                        // CRITICAL: Only delete from orders table, NOT from admin_orders table
-                        // This ensures supplier deletions are independent from admin orders
-                        // Admin orders (admin_orders table) are managed separately in admin/orders.php
-                        $delOrderStmt = $db->prepare("DELETE FROM orders WHERE id = ? AND supplier_id = ?");
-                        if ($delOrderStmt->execute([$order_id, $supplier_id])) {
-                            $deleted_count++;
-                            error_log("Success: Deleted order #{$order_id} and all related records from database");
-                        } else {
-                            error_log("Warning: Failed to delete order #{$order_id} from orders table");
-                        }
-                    } catch (Exception $e) {
-                        error_log("Error deleting order #{$order_id}: " . $e->getMessage());
-                        // Continue with next order
-                    }
-                }
-                
-                $db->commit();
-                echo json_encode(['success' => true, 'message' => "{$deleted_count} order(s) deleted permanently from database."]);
-            } catch (Exception $e) {
-                if ($db->inTransaction()) { $db->rollBack(); }
-                error_log("Error in bulk_delete: " . $e->getMessage());
-                echo json_encode(['success' => false, 'message' => 'Error: ' . $e->getMessage()]);
-            }
-            exit();
-            
         case 'get_new_orders_count':
             // Get count of new orders for this supplier
             $stmt = $db->prepare("SELECT COUNT(*) as count FROM orders WHERE supplier_id = ? AND confirmation_status = 'pending' AND created_at > DATE_SUB(NOW(), INTERVAL 1 HOUR)");
@@ -407,6 +325,33 @@ if (isset($_POST['action'])) {
 $orders_stmt = $order->readBySupplier($supplier_id);
 $orders = $orders_stmt->fetchAll(PDO::FETCH_ASSOC);
 
+// Compute effective unit price per order (variation-aware, robust fallbacks)
+$invVariation = new InventoryVariation($db);
+foreach ($orders as &$o) {
+    $invId = isset($o['inventory_id']) ? (int)$o['inventory_id'] : 0;
+    $varKey = isset($o['variation']) ? (string)$o['variation'] : '';
+    $uType  = isset($o['unit_type']) ? (string)$o['unit_type'] : 'per piece';
+    $eff    = isset($o['unit_price']) ? (float)$o['unit_price'] : 0.0;
+    if (($eff === 0.0 || $eff === null) && $invId > 0 && $varKey !== '') {
+        $try = $invVariation->getPrice($invId, $varKey, $uType);
+        if ($try !== null && $try > 0) { $eff = (float)$try; }
+        if ($eff === 0.0) {
+            $varData = $invVariation->getVariationDataByInventory($invId);
+            if (!empty($varData['prices'][$varKey]) && $varData['prices'][$varKey] > 0) {
+                $eff = (float)$varData['prices'][$varKey];
+            }
+        }
+        if ($eff === 0.0) {
+            $varPriceStmt = $db->prepare("SELECT unit_price FROM admin_orders WHERE inventory_id = :inv_id AND variation = :variation ORDER BY order_date DESC LIMIT 1");
+            $varPriceStmt->execute([':inv_id' => $invId, ':variation' => $varKey]);
+            $varPriceRow = $varPriceStmt->fetch(PDO::FETCH_ASSOC);
+            if ($varPriceRow && (float)$varPriceRow['unit_price'] > 0) { $eff = (float)$varPriceRow['unit_price']; }
+        }
+    }
+    $o['unit_price_effective'] = $eff;
+}
+unset($o);
+
 // Calculate statistics
 $total_orders = count($orders);
 $pending_orders = array_filter($orders, function($o) { return $o['confirmation_status'] === 'pending'; });
@@ -419,7 +364,8 @@ $cancelled_count = count($cancelled_orders);
 
 // Calculate total value
 $total_value = array_sum(array_map(function($o) { 
-    return ($o['unit_price'] ?? 0) * $o['quantity']; 
+    $p = isset($o['unit_price_effective']) ? (float)$o['unit_price_effective'] : (float)($o['unit_price'] ?? 0);
+    return ((int)$o['quantity']) * $p; 
 }, $orders));
 
 // Get variation data for all inventory items
@@ -858,20 +804,14 @@ if (!empty($inventory_ids)) {
 
                 <!-- Orders Table -->
                 <div class="card">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0"><i class="bi bi-list-ul me-2"></i>All Orders</h5>
-                        <button type="button" class="btn btn-danger btn-sm" id="bulkDeleteBtn" style="display: none;">
-                            <i class="bi bi-trash me-1"></i>Delete Selected (<span id="selectedCount">0</span>)
-                        </button>
+                    <div class="card-header">
+                        <h5><i class="bi bi-list-ul me-2"></i>All Orders</h5>
                     </div>
                     <div class="card-body">
                         <div class="table-responsive">
                             <table class="table table-hover" id="ordersTable">
                                 <thead>
                                     <tr>
-                                        <th width="50">
-                                            <input type="checkbox" id="selectAllOrders" title="Select All">
-                                        </th>
                                         <th>Order ID</th>
                                         <th>Product Details</th>
                                         <th>Unit Type</th>
@@ -887,7 +827,7 @@ if (!empty($inventory_ids)) {
                                 <tbody>
                                     <?php if (empty($orders)): ?>
                                     <tr>
-                                        <td colspan="11" class="text-center py-5">
+                                        <td colspan="10" class="text-center py-5">
                                             <div class="text-muted">
                                                 <i class="bi bi-inbox" style="font-size: 3rem;"></i>
                                                 <p class="mt-3 mb-0 fs-5">No orders available</p>
@@ -898,9 +838,6 @@ if (!empty($inventory_ids)) {
                                     <?php else: ?>
                                     <?php foreach ($orders as $order_item): ?>
                                     <tr>
-                                        <td>
-                                            <input type="checkbox" class="order-checkbox" value="<?php echo (int)($order_item['id'] ?? 0); ?>" data-order-id="<?php echo (int)($order_item['id'] ?? 0); ?>">
-                                        </td>
                                         <td class="order-id-cell">
                                             <strong>#<?php echo $order_item['id']; ?></strong>
                                             <small class="d-block text-muted">
@@ -931,9 +868,10 @@ if (!empty($inventory_ids)) {
                                             <strong><?php echo $order_item['quantity']; ?></strong>
                                         </td>
                                         <td>
+                                            <?php $eff = isset($order_item['unit_price_effective']) ? (float)$order_item['unit_price_effective'] : (float)($order_item['unit_price'] ?? 0); ?>
                                             <div class="d-flex flex-column">
-                                                <strong class="text-success fs-6">₱<?php echo number_format(($order_item['unit_price'] ?? 0) * $order_item['quantity'], 2); ?></strong>
-                                                <small class="text-muted">(₱<?php echo number_format($order_item['unit_price'] ?? 0, 2); ?> × <?= $order_item['quantity'] ?>)</small>
+                                                <strong>₱<?php echo number_format(((int)$order_item['quantity']) * $eff, 2); ?></strong>
+                                                <small class="text-muted">(₱<?php echo number_format($eff, 2); ?> × <?= (int)$order_item['quantity'] ?>)</small>
                                             </div>
                                         </td>
                                         <td>
@@ -1014,75 +952,6 @@ if (!empty($inventory_ids)) {
 
     <script>
         $(document).ready(function() {
-            // Multi-select functionality
-            const selectAllCheckbox = $('#selectAllOrders');
-            const orderCheckboxes = $('.order-checkbox');
-            const bulkDeleteBtn = $('#bulkDeleteBtn');
-            const selectedCountSpan = $('#selectedCount');
-            
-            // Update selected count and show/hide bulk delete button
-            function updateSelection() {
-                const checked = $('.order-checkbox:checked').length;
-                selectedCountSpan.text(checked);
-                if (checked > 0) {
-                    bulkDeleteBtn.show();
-                } else {
-                    bulkDeleteBtn.hide();
-                }
-                
-                // Update select all checkbox state
-                const total = orderCheckboxes.length;
-                selectAllCheckbox.prop('indeterminate', checked > 0 && checked < total);
-                selectAllCheckbox.prop('checked', checked === total && total > 0);
-            }
-            
-            // Select all checkbox handler
-            selectAllCheckbox.on('change', function() {
-                orderCheckboxes.prop('checked', $(this).is(':checked'));
-                updateSelection();
-            });
-            
-            // Individual checkbox handler
-            $(document).on('change', '.order-checkbox', function() {
-                updateSelection();
-            });
-            
-            // Bulk delete handler
-            bulkDeleteBtn.on('click', function() {
-                const selected = $('.order-checkbox:checked').map(function() {
-                    return $(this).val();
-                }).get();
-                
-                if (selected.length === 0) {
-                    alert('Please select at least one order to delete.');
-                    return;
-                }
-                
-                const orderIds = $('.order-checkbox:checked').map(function() {
-                    return $(this).data('order-id');
-                }).get().join(', #');
-                
-                if (confirm(`⚠️ WARNING: This will PERMANENTLY DELETE ${selected.length} order(s) from the database!\n\nOrder IDs: #${orderIds}\n\nThis action cannot be undone. All related records (notifications, deliveries, payments) will also be deleted.\n\nAre you absolutely sure you want to proceed?`)) {
-                    $.post('', {
-                        action: 'bulk_delete',
-                        order_ids: selected
-                    }, function(response) {
-                        if (response && response.success) {
-                            showNotification(response.message || 'Orders cancelled successfully!', 'success');
-                            setTimeout(() => location.reload(), 1500);
-                        } else {
-                            showNotification('Failed to delete orders: ' + (response.message || 'Unknown error'), 'error');
-                        }
-                    }, 'json').fail(function(xhr, status, error) {
-                        console.error('AJAX Error:', status, error);
-                        showNotification('Error deleting orders. Please try again.', 'error');
-                    });
-                }
-            });
-            
-            // Initialize selection state
-            updateSelection();
-            
             // Initialize DataTable with enhanced search (guard against placeholder colspan row)
             const $ordersTable = $('#ordersTable');
             const hasRows = $ordersTable.find('tbody tr').length > 0;
@@ -1092,9 +961,9 @@ if (!empty($inventory_ids)) {
                 $ordersTable.DataTable({
                     responsive: true,
                     pageLength: 25,
-                    order: [[8, 'desc']], // Sort by order date descending (column 8, 0-indexed, adjusted for checkbox column)
+                    order: [[7, 'desc']], // Sort by order date descending (column 7, 0-indexed)
                     columnDefs: [
-                        { orderable: false, targets: [0, 10] } // Disable sorting for checkbox and actions columns
+                        { orderable: false, targets: [9] } // Disable sorting for actions column (column 9, 0-indexed)
                     ],
                     language: {
                         search: "Search Orders:",

@@ -116,7 +116,7 @@ class SupplierCatalog {
 
     public function updateBySupplier($supplier_id) {
         if (!$this->belongsToSupplier($this->id, $supplier_id)) { return false; }
-        $query = "UPDATE {$this->table_name} SET sku = :sku, name = :name, description = :description, category = :category, unit_price = :unit_price, unit_type = :unit_type, location = :location, reorder_threshold = :reorder_threshold WHERE id = :id AND supplier_id = :sid";
+        $query = "UPDATE {$this->table_name} SET sku = :sku, name = :name, description = :description, category = :category, unit_price = :unit_price, unit_type = :unit_type, location = :location WHERE id = :id AND supplier_id = :sid";
         $stmt = $this->conn->prepare($query);
         $this->sku = htmlspecialchars(strip_tags($this->sku));
         $this->name = htmlspecialchars(strip_tags($this->name));
@@ -125,7 +125,6 @@ class SupplierCatalog {
         $this->unit_price = (float)$this->unit_price;
         $this->unit_type = $this->unit_type ?: 'per piece';
         $this->location = htmlspecialchars(strip_tags($this->location));
-        $this->reorder_threshold = (int)($this->reorder_threshold ?? 10);
         $stmt->bindParam(':sku', $this->sku);
         $stmt->bindParam(':name', $this->name);
         $stmt->bindParam(':description', $this->description);
@@ -133,7 +132,6 @@ class SupplierCatalog {
         $stmt->bindParam(':unit_price', $this->unit_price);
         $stmt->bindParam(':unit_type', $this->unit_type);
         $stmt->bindParam(':location', $this->location);
-        $stmt->bindParam(':reorder_threshold', $this->reorder_threshold, PDO::PARAM_INT);
         $stmt->bindParam(':id', $this->id, PDO::PARAM_INT);
         $stmt->bindParam(':sid', $supplier_id, PDO::PARAM_INT);
         return $stmt->execute();

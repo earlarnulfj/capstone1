@@ -18,7 +18,7 @@
     this.running = false;
   };
   VariationSync.prototype.log = function(msg){
-    // Debug logging removed for production
+    try { console.log('[VariationSync]', msg); } catch(e){}
   };
   VariationSync.prototype.toast = function(message, type){
     // Try to use page-provided toast helper if present

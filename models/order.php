@@ -325,26 +325,7 @@ class Order {
 
     // Read orders by supplier
     public function readBySupplier($supplier_id) {
-        $query = "SELECT o.id,
-                         o.inventory_id,
-                         o.supplier_id,
-                         o.user_id,
-                         o.quantity,
-                         o.is_automated,
-                         o.order_date,
-                         o.confirmation_status,
-                         o.confirmation_date,
-                         COALESCE(o.unit_price, i.unit_price, 0) as unit_price,
-                         o.unit_type,
-                         o.variation,
-                         i.name as inventory_name,
-                         i.category,
-                         i.unit_price as inventory_unit_price,
-                         s.name as supplier_name, 
-                         u.username as user_name,
-                         u.id as customer_id,
-                         u.email as customer_email,
-                         u.username as customer_name
+        $query = "SELECT o.*, i.name as inventory_name, i.unit_price, s.name as supplier_name, u.username as user_name 
                   FROM " . $this->table_name . " o
                   LEFT JOIN inventory i ON o.inventory_id = i.id
                   LEFT JOIN suppliers s ON o.supplier_id = s.id

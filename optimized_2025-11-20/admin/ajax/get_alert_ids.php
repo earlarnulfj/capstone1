@@ -19,7 +19,6 @@ try {
         exit();
     }
     
-    // Build query to find matching unresolved alerts
     $sql = "SELECT id FROM alert_logs 
             WHERE inventory_id = :inv_id 
               AND is_resolved = 0";
@@ -54,4 +53,3 @@ try {
     http_response_code(500);
     echo json_encode(['error' => 'Internal server error', 'message' => $e->getMessage()]);
 }
-

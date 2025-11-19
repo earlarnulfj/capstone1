@@ -63,34 +63,6 @@ $current_page = basename($_SERVER['PHP_SELF']);
             <li class="nav-item">
                 <a class="nav-link <?php echo ($current_page == 'notifications.php') ? 'active' : ''; ?>" href="notifications.php">
                     <i class="bi bi-bell me-2"></i>Notifications
-                    <?php
-                    // Get unread notification count
-                    $unreadNotificationCount = 0;
-                    try {
-                        if (isset($pdo)) {
-                            $supplier_id_for_notif = (int)($_SESSION['supplier']['user_id'] ?? $_SESSION['user_id'] ?? 0);
-                            if ($supplier_id_for_notif > 0) {
-                                $notifStmt = $pdo->prepare("SELECT COUNT(*) as count 
-                                                            FROM notifications 
-                                                            WHERE recipient_type = 'supplier' 
-                                                            AND recipient_id = :supplier_id 
-                                                            AND (is_read = 0 OR is_read IS NULL)
-                                                            AND (status IS NULL OR status != 'read')");
-                                $notifStmt->bindValue(':supplier_id', $supplier_id_for_notif, PDO::PARAM_INT);
-                                $notifStmt->execute();
-                                $notifResult = $notifStmt->fetch(PDO::FETCH_ASSOC);
-                                $unreadNotificationCount = (int)($notifResult['count'] ?? 0);
-                            }
-                        }
-                    } catch (Exception $e) {
-                        $unreadNotificationCount = 0;
-                    }
-                    ?>
-                    <?php if ($unreadNotificationCount > 0): ?>
-                        <span id="sidebar-notification-badge" class="badge bg-primary ms-auto" role="status" aria-live="polite" aria-atomic="true" aria-label="Unread notifications: <?= $unreadNotificationCount ?>"><?= $unreadNotificationCount ?></span>
-                    <?php else: ?>
-                        <span id="sidebar-notification-badge" class="badge bg-primary ms-auto" role="status" aria-live="polite" aria-atomic="true" aria-label="No unread notifications" style="display:none"></span>
-                    <?php endif; ?>
                 </a>
             </li>
             <li class="nav-item">
@@ -236,45 +208,4 @@ if (supplierId > 0) {
     // Check immediately on page load
     setTimeout(checkUnreadMessages, 1000);
 }
-
-// Check for unread notifications periodically
-function checkUnreadNotifications() {
-    fetch('ajax/get_notification_count.php?t=' + Date.now(), {
-        method: 'GET',
-        headers: {
-            'Content-Type': 'application/json',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache'
-        },
-        credentials: 'same-origin',
-        cache: 'no-store'
-    })
-    .then(function(response) { 
-        if (!response.ok) throw new Error('Network response was not ok');
-        return response.json(); 
-    })
-    .then(function(data) {
-        const badge = document.getElementById('sidebar-notification-badge');
-        const count = parseInt(data.count || 0);
-        if (badge) {
-            if (count > 0) {
-                badge.textContent = count;
-                badge.style.display = 'inline';
-                badge.setAttribute('aria-label', 'Unread notifications: ' + count);
-            } else {
-                badge.style.display = 'none';
-                badge.textContent = '0';
-                badge.setAttribute('aria-label', 'No unread notifications');
-            }
-        }
-    })
-    .catch(function(error) {
-        console.error('Error checking unread notifications:', error);
-    });
-}
-
-// Check for unread notifications every 30 seconds
-setInterval(checkUnreadNotifications, 30000);
-// Check immediately on page load
-setTimeout(checkUnreadNotifications, 1000);
 </script>

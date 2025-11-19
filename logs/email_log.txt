@@ -152,5 +152,3 @@
 2025-10-29 09:27:55 | success | to=earlarnulfj@gmail.com | sent
 2025-10-31 16:07:22 | success | to=vpvillanueva.chmsu@gmail.com | sent
 2025-11-02 15:57:28 | success | to=vpvillanueva.chmsu@gmail.com | sent
-2025-11-13 11:52:09 | success | to=vpvillanueva.chmsu@gmail.com | sent
-2025-11-13 11:52:13 | success | to=vpvillanueva.chmsu@gmail.com | sent

@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Receipt Formatting Test</title>
+    <link href="https://fonts.googleapis.com/css2?family=Libre+Barcode+128&display=swap" rel="stylesheet">
+    <style>
+        body { 
+            font-family: 'Courier New', monospace; 
+            margin: 20px; 
+            background: #f5f5f5;
+        }
+        
+        .test-container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .receipt-sample {
+            background: white;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin: 20px;
+            display: inline-block;
+            vertical-align: top;
+            width: 300px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        /* Screen preview styling */
+        .receipt-header {
+            text-align: center;
+            margin-bottom: 10px;
+            border-bottom: 1px dashed #000;
+            padding-bottom: 5px;
+        }
+        
+        .receipt-header h4 {
+            font-size: 12pt;
+            font-weight: bold;
+            margin: 2px 0;
+        }
+        
+        .receipt-header p {
+            font-size: 9pt;
+            margin: 1px 0;
+        }
+        
+        .receipt-details p {
+            margin: 2px 0;
+            display: flex;
+            justify-content: space-between;
+            font-size: 9pt;
+        }
+        
+        .receipt-items table {
+            width: 100%;
+            border-collapse: collapse;
+            font-family: 'Courier New', monospace;
+            font-size: 9pt;
+        }
+        
+        .receipt-items th,
+        .receipt-items td {
+            padding: 1px 0;
+            vertical-align: top;
+        }
+        
+        .receipt-items th {
+            font-weight: bold;
+            border-bottom: 1px solid #000;
+        }
+        
+        .col-item {
+            width: 120px;
+            text-align: left;
+        }
+        
+        .col-qty {
+            width: 25px;
+            text-align: center;
+        }
+        
+        .col-price {
+            width: 50px;
+            text-align: right;
+        }
+        
+        .col-total {
+            width: 60px;
+            text-align: right;
+        }
+        
+        .item-name {
+            font-weight: normal;
+            word-wrap: break-word;
+            max-width: 120px;
+        }
+        
+        .item-variation {
+            font-size: 8pt;
+            color: #666;
+            font-style: italic;
+        }
+        
+        .receipt-totals div {
+            display: flex;
+            justify-content: space-between;
+            margin: 2px 0;
+            font-size: 9pt;
+        }
+        
+        .receipt-footer {
+            text-align: center;
+            margin-top: 15px;
+            padding-top: 5px;
+            border-top: 1px dashed #000;
+        }
+        
+        .receipt-footer p {
+            margin: 2px 0;
+            font-size: 9pt;
+        }
+        
+        .receipt-barcode {
+            text-align: center;
+            margin: 10px 0;
+            font-family: 'Libre Barcode 128', monospace;
+            font-size: 20pt;
+        }
+        
+        .test-scenarios {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .scenario {
+            margin: 10px 0;
+            padding: 10px;
+            border-left: 4px solid #007bff;
+            background: #f8f9fa;
+        }
+        
+        h1, h2 {
+            color: #333;
+        }
+        
+        .print-test {
+            margin: 20px 0;
+            text-align: center;
+        }
+        
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        
+        button:hover {
+            background: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <div class="test-container">
+        <h1>Receipt Formatting Test Suite</h1>
+        <p>This page tests various receipt formatting scenarios to ensure proper display on thermal printers.</p>
+        
+        <div class="test-scenarios">
+            <h2>Test Scenarios</h2>
+            
+            <div class="scenario">
+                <h3>Scenario 1: Normal Items</h3>
+                <p>Standard items with regular names and quantities</p>
+            </div>
+            
+            <div class="scenario">
+                <h3>Scenario 2: Long Product Names</h3>
+                <p>Items with very long names to test line wrapping and truncation</p>
+            </div>
+            
+            <div class="scenario">
+                <h3>Scenario 3: Multiple Variations</h3>
+                <p>Items with various product variations</p>
+            </div>
+            
+            <div class="scenario">
+                <h3>Scenario 4: Large Quantities</h3>
+                <p>Items with large quantities and prices</p>
+            </div>
+        </div>
+        
+        <div class="print-test">
+            <button onclick="printAllReceipts()">Print All Test Receipts</button>
+            <button onclick="window.print()">Print This Page</button>
+        </div>
+        
+        <!-- Test Receipt 1: Normal Items -->
+        <div class="receipt-sample">
+            <div class="receipt-container">
+                <div class="receipt-header">
+                    <h4>Hardware Store</h4>
+                    <p>Talisay City</p>
+                    <p>Tel: 123-456-7890</p>
+                </div>
+                
+                <div class="receipt-details">
+                    <p><span>Date:</span> <span>2025-11-15 14:30:25</span></p>
+                    <p><span>Cashier:</span> <span>Admin</span></p>
+                    <p><span>Receipt #:</span> <span>20251115143025</span></p>
+                </div>
+                
+                <div class="receipt-items">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th class="col-item">Item</th>
+                                <th class="col-qty">Qty</th>
+                                <th class="col-price">Price</th>
+                                <th class="col-total">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="col-item">
+                                    <div class="item-name">Hammer</div>
+                                </td>
+                                <td class="col-qty">1</td>
+                                <td class="col-price">150.00</td>
+                                <td class="col-total">150.00</td>
+                            </tr>
+                            <tr>
+                                <td class="col-item">
+                                    <div class="item-name">Nails 1kg</div>
+                                </td>
+                                <td class="col-qty">2</td>
+                                <td class="col-price">85.00</td>
+                                <td class="col-total">170.00</td>
+                            </tr>
+                            <tr>
+                                <td class="col-item">
+                                    <div class="item-name">Screwdriver Set</div>
+                                </td>
+                                <td class="col-qty">1</td>
+                                <td class="col-price">250.00</td>
+                                <td class="col-total">250.00</td>
+                            </tr>
+                            <tr style="border-top: 1px solid #000;">
+                                <td colspan="3" style="text-align: right; font-weight: bold;">TOTAL:</td>
+                                <td class="col-total" style="font-weight: bold;">570.00</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div class="receipt-totals">
+                    <div><span>Subtotal:</span> <span>₱570.00</span></div>
+                    <div><span>Total:</span> <span>₱570.00</span></div>
+                    <div><span>Amount Received:</span> <span>₱600.00</span></div>
+                    <div><span>Change:</span> <span>₱30.00</span></div>
+                </div>
+                
+                <div class="receipt-barcode">20251115143025</div>
+                
+                <div class="receipt-footer">
+                    <p>Thank you for your purchase!</p>
+                    <p>Please come again</p>
+                    <p>VAT Registered</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Test Receipt 2: Long Product Names -->
+        <div class="receipt-sample">
+            <div class="receipt-container">
+                <div class="receipt-header">
+                    <h4>Hardware Store</h4>
+                    <p>Talisay City</p>
+                    <p>Tel: 123-456-7890</p>
+                </div>
+                
+                <div class="receipt-details">
+                    <p><span>Date:</span> <span>2025-11-15 14:35:10</span></p>
+                    <p><span>Cashier:</span> <span>Admin</span></p>
+                    <p><span>Receipt #:</span> <span>20251115143510</span></p>
+                </div>
+                
+                <div class="receipt-items">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th class="col-item">Item</th>
+                                <th class="col-qty">Qty</th>
+                                <th class="col-price">Price</th>
+                                <th class="col-total">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="col-item">
+                                    <div class="item-name">Professional Grade Heavy Duty Electric Drill with Variable Speed Control</div>
+                                </td>
+                                <td class="col-qty">1</td>
+                                <td class="col-price">2850.00</td>
+                                <td class="col-total">2850.00</td>
+                            </tr>
+                            <tr>
+                                <td class="col-item">
+                                    <div class="item-name">Premium Quality Stainless Steel Multi-Purpose Tool Set with Carrying Case</div>
+                                </td>
+                                <td class="col-qty">1</td>
+                                <td class="col-price">1250.00</td>
+                                <td class="col-total">1250.00</td>
+                            </tr>
+                            <tr style="border-top: 1px solid #000;">
+                                <td colspan="3" style="text-align: right; font-weight: bold;">TOTAL:</td>
+                                <td class="col-total" style="font-weight: bold;">4100.00</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div class="receipt-totals">
+                    <div><span>Subtotal:</span> <span>₱4100.00</span></div>
+                    <div><span>Total:</span> <span>₱4100.00</span></div>
+                    <div><span>Amount Received:</span> <span>₱5000.00</span></div>
+                    <div><span>Change:</span> <span>₱900.00</span></div>
+                </div>
+                
+                <div class="receipt-barcode">20251115143510</div>
+                
+                <div class="receipt-footer">
+                    <p>Thank you for your purchase!</p>
+                    <p>Please come again</p>
+                    <p>VAT Registered</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Test Receipt 3: Items with Variations -->
+        <div class="receipt-sample">
+            <div class="receipt-container">
+                <div class="receipt-header">
+                    <h4>Hardware Store</h4>
+                    <p>Talisay City</p>
+                    <p>Tel: 123-456-7890</p>
+                </div>
+                
+                <div class="receipt-details">
+                    <p><span>Date:</span> <span>2025-11-15 14:40:45</span></p>
+                    <p><span>Cashier:</span> <span>Admin</span></p>
+                    <p><span>Receipt #:</span> <span>20251115144045</span></p>
+                </div>
+                
+                <div class="receipt-items">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th class="col-item">Item</th>
+                                <th class="col-qty">Qty</th>
+                                <th class="col-price">Price</th>
+                                <th class="col-total">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="col-item">
+                                    <div class="item-name">Paint Brush</div>
+                                    <div class="item-variation">2 inches, Blue Handle</div>
+                                </td>
+                                <td class="col-qty">3</td>
+                                <td class="col-price">45.00</td>
+                                <td class="col-total">135.00</td>
+                            </tr>
+                            <tr>
+                                <td class="col-item">
+                                    <div class="item-name">PVC Pipe</div>
+                                    <div class="item-variation">1/2 inch, 10 feet</div>
+                                </td>
+                                <td class="col-qty">2</td>
+                                <td class="col-price">120.00</td>
+                                <td class="col-total">240.00</td>
+                            </tr>
+                            <tr>
+                                <td class="col-item">
+                                    <div class="item-name">Door Lock</div>
+                                    <div class="item-variation">Stainless Steel, Mortise Type</div>
+                                </td>
+                                <td class="col-qty">1</td>
+                                <td class="col-price">380.00</td>
+                                <td class="col-total">380.00</td>
+                            </tr>
+                            <tr style="border-top: 1px solid #000;">
+                                <td colspan="3" style="text-align: right; font-weight: bold;">TOTAL:</td>
+                                <td class="col-total" style="font-weight: bold;">755.00</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div class="receipt-totals">
+                    <div><span>Subtotal:</span> <span>₱755.00</span></div>
+                    <div><span>Total:</span> <span>₱755.00</span></div>
+                    <div><span>Amount Received:</span> <span>₱1000.00</span></div>
+                    <div><span>Change:</span> <span>₱245.00</span></div>
+                </div>
+                
+                <div class="receipt-barcode">20251115144045</div>
+                
+                <div class="receipt-footer">
+                    <p>Thank you for your purchase!</p>
+                    <p>Please come again</p>
+                    <p>VAT Registered</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Test Receipt 4: Large Quantities -->
+        <div class="receipt-sample">
+            <div class="receipt-container">
+                <div class="receipt-header">
+                    <h4>Hardware Store</h4>
+                    <p>Talisay City</p>
+                    <p>Tel: 123-456-7890</p>
+                </div>
+                
+                <div class="receipt-details">
+                    <p><span>Date:</span> <span>2025-11-15 14:45:20</span></p>
+                    <p><span>Cashier:</span> <span>Admin</span></p>
+                    <p><span>Receipt #:</span> <span>20251115144520</span></p>
+                </div>
+                
+                <div class="receipt-items">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th class="col-item">Item</th>
+                                <th class="col-qty">Qty</th>
+                                <th class="col-price">Price</th>
+                                <th class="col-total">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="col-item">
+                                    <div class="item-name">Cement 50kg</div>
+                                </td>
+                                <td class="col-qty">25</td>
+                                <td class="col-price">235.00</td>
+                                <td class="col-total">5875.00</td>
+                            </tr>
+                            <tr>
+                                <td class="col-item">
+                                    <div class="item-name">Hollow Blocks 4"</div>
+                                </td>
+                                <td class="col-qty">150</td>
+                                <td class="col-price">12.50</td>
+                                <td class="col-total">1875.00</td>
+                            </tr>
+                            <tr>
+                                <td class="col-item">
+                                    <div class="item-name">Steel Bars 10mm</div>
+                                </td>
+                                <td class="col-qty">45</td>
+                                <td class="col-price">180.00</td>
+                                <td class="col-total">8100.00</td>
+                            </tr>
+                            <tr style="border-top: 1px solid #000;">
+                                <td colspan="3" style="text-align: right; font-weight: bold;">TOTAL:</td>
+                                <td class="col-total" style="font-weight: bold;">15850.00</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div class="receipt-totals">
+                    <div><span>Subtotal:</span> <span>₱15850.00</span></div>
+                    <div><span>Total:</span> <span>₱15850.00</span></div>
+                    <div><span>Amount Received:</span> <span>₱16000.00</span></div>
+                    <div><span>Change:</span> <span>₱150.00</span></div>
+                </div>
+                
+                <div class="receipt-barcode">20251115144520</div>
+                
+                <div class="receipt-footer">
+                    <p>Thank you for your purchase!</p>
+                    <p>Please come again</p>
+                    <p>VAT Registered</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        function printAllReceipts() {
+            const receipts = document.querySelectorAll('.receipt-sample');
+            let printContent = '';
+            
+            receipts.forEach((receipt, index) => {
+                printContent += `
+                    <div style="page-break-after: always; width: 80mm; margin: 0 auto; font-family: 'Courier New', monospace; font-size: 10pt;">
+                        ${receipt.innerHTML}
+                    </div>
+                `;
+            });
+            
+            const printWindow = window.open('', '_blank', 'width=350,height=600');
+            printWindow.document.write(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Receipt Tests</title>
+                    <style>
+                        @media print {
+                            body { margin: 0; }
+                            .receipt-sample { 
+                                width: 76mm; 
+                                margin: 0 auto; 
+                                page-break-after: always;
+                                font-family: 'Courier New', monospace;
+                                font-size: 10pt;
+                            }
+                            .receipt-sample:last-child { page-break-after: avoid; }
+                        }
+                    </style>
+                </head>
+                <body>
+                    ${printContent}
+                </body>
+                </html>
+            `);
+            printWindow.document.close();
+            printWindow.print();
+        }
+    </script>
+</body>
+</html>

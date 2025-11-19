@@ -11,6 +11,7 @@ require_once '../models/admin_order.php';  // Add AdminOrder for admin_orders ta
 require_once '../models/payment.php';
 require_once '../models/sales_transaction.php';
 require_once '../models/alert_log.php';
+require_once '../models/notification.php';
 // Include supplier catalog and variations to mirror into admin inventory
 require_once '../models/supplier_catalog.php';
 require_once '../models/supplier_product_variation.php';
@@ -35,6 +36,7 @@ $supplier  = new Supplier($db);
 $order     = new Order($db);          // For orders table (supplier orders)
 $adminOrder = new AdminOrder($db);   // For admin_orders table (admin orders)
 $payment   = new Payment($db);
+$notification = new Notification($db);
 // Models for mirroring supplier catalog items to admin inventory
 $catalog      = new SupplierCatalog($db);
 $spVariation  = new SupplierProductVariation($db);
@@ -96,13 +98,42 @@ try {
                 continue; // Skip - already exists
             }
             
-            // CRITICAL: Check if SKU exists globally (for other suppliers) - skip to avoid conflicts
-            if ($inventory->skuExists($sku)) {
-                error_log("Warning: SKU {$sku} exists in inventory for another supplier. Skipping sync to avoid duplicates.");
-                continue;
+            // Check if SKU exists for THIS supplier (not globally, since SKUs can be unique per supplier)
+            // The unique constraint is on (supplier_id, sku), so same SKU can exist for different suppliers
+            $skuCheckStmt = $db->prepare("SELECT id, is_deleted FROM inventory WHERE sku = :sku AND supplier_id = :sid LIMIT 1");
+            $skuCheckStmt->execute([':sku' => $sku, ':sid' => $supplier_id]);
+            $skuRow = $skuCheckStmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($skuRow) {
+                // SKU exists for this supplier - restore if soft-deleted and update link
+                $found_id = (int)$skuRow['id'];
+                $is_deleted = (int)($skuRow['is_deleted'] ?? 0);
+                
+                if ($is_deleted) {
+                    // Restore soft-deleted item
+                    try {
+                        $restoreStmt = $db->prepare("UPDATE inventory SET is_deleted = 0 WHERE id = :id");
+                        $restoreStmt->execute([':id' => $found_id]);
+                        error_log("Restored soft-deleted inventory item ID {$found_id} for SKU {$sku}");
+                    } catch (Exception $e) {
+                        error_log("Warning: Could not restore soft-deleted inventory item: " . $e->getMessage());
+                    }
+                }
+                
+                // Update source_inventory_id link if needed
+                if (empty($cat['source_inventory_id']) || (int)$cat['source_inventory_id'] !== $found_id) {
+                    try {
+                        $updateLink = $db->prepare("UPDATE supplier_catalog SET source_inventory_id = :inv_id WHERE id = :cat_id");
+                        $updateLink->execute([':inv_id' => $found_id, ':cat_id' => $catalogId]);
+                    } catch (Exception $e) {
+                        error_log("Warning: Could not update source_inventory_id for catalog ID {$catalogId}: " . $e->getMessage());
+                    }
+                }
+                continue; // Skip - already exists for this supplier
             }
 
             // Create mirrored inventory item linked to this supplier
+            // Note: SKU can exist for other suppliers - that's OK due to unique constraint on (supplier_id, sku)
             // This ensures products from supplier/products.php are immediately available for ordering
             $inventory->sku               = $sku;
             $inventory->name              = $cat['name'] ?? '';
@@ -257,12 +288,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         $inventory_id = $cat_data['source_inventory_id'];
                     }
                     
-                    // If no source_inventory_id, find by SKU and supplier
+                    // If no source_inventory_id, find by SKU and supplier (including soft-deleted items to restore them)
                     if (!$inventory_id) {
-                        $sku_stmt = $db->prepare("SELECT id FROM inventory WHERE sku = :sku AND supplier_id = :sid LIMIT 1");
-                        $sku_stmt->execute([':sku' => $cat_data['sku'] ?? '', ':sid' => $supplier_id]);
-                        $sku_row = $sku_stmt->fetch(PDO::FETCH_ASSOC);
-                        $inventory_id = $sku_row ? (int)$sku_row['id'] : null;
+                        $sku = trim($cat_data['sku'] ?? '');
+                        if (!empty($sku)) {
+                            // First try to find active item
+                            $sku_stmt = $db->prepare("SELECT id, is_deleted FROM inventory WHERE sku = :sku AND supplier_id = :sid LIMIT 1");
+                            $sku_stmt->execute([':sku' => $sku, ':sid' => $supplier_id]);
+                            $sku_row = $sku_stmt->fetch(PDO::FETCH_ASSOC);
+                            
+                            if ($sku_row) {
+                                $found_id = (int)$sku_row['id'];
+                                $is_deleted = (int)($sku_row['is_deleted'] ?? 0);
+                                
+                                if ($is_deleted) {
+                                    // Item exists but is soft-deleted - restore it
+                                    try {
+                                        $restoreStmt = $db->prepare("UPDATE inventory SET is_deleted = 0 WHERE id = :id");
+                                        $restoreStmt->execute([':id' => $found_id]);
+                                        $inventory_id = $found_id;
+                                        error_log("Restored soft-deleted inventory item ID {$found_id} for SKU {$sku}");
+                                    } catch (Throwable $e) {
+                                        error_log("Warning: Could not restore soft-deleted inventory item: " . $e->getMessage());
+                                        $inventory_id = null;
+                                    }
+                                } else {
+                                    $inventory_id = $found_id;
+                                }
+                            }
+                        }
                     }
                     
                     // If inventory_id still not found, try to create it from supplier catalog (best-effort sync)
@@ -279,29 +333,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         }
                         
                         try {
-                            // Check if SKU exists globally (for other suppliers) - skip to avoid conflicts
-                            if ($inventory->skuExists($sku)) {
-                                // SKU exists for another supplier - try to find by SKU + supplier_id anyway
-                                $skuCheckStmt = $db->prepare("SELECT id FROM inventory WHERE sku = :sku AND supplier_id = :sid AND COALESCE(is_deleted, 0) = 0 LIMIT 1");
-                                $skuCheckStmt->execute([':sku' => $sku, ':sid' => $supplier_id]);
-                                $skuRow = $skuCheckStmt->fetch(PDO::FETCH_ASSOC);
-                                if ($skuRow) {
-                                    $inventory_id = (int)$skuRow['id'];
-                                    // Update source_inventory_id link
+                            // Check if SKU exists for THIS supplier (not globally, since SKUs can be unique per supplier)
+                            // The unique constraint is on (supplier_id, sku), so same SKU can exist for different suppliers
+                            $skuCheckStmt = $db->prepare("SELECT id, is_deleted FROM inventory WHERE sku = :sku AND supplier_id = :sid LIMIT 1");
+                            $skuCheckStmt->execute([':sku' => $sku, ':sid' => $supplier_id]);
+                            $skuRow = $skuCheckStmt->fetch(PDO::FETCH_ASSOC);
+                            
+                            if ($skuRow) {
+                                // SKU exists for this supplier - use it (restore if soft-deleted)
+                                $found_id = (int)$skuRow['id'];
+                                $is_deleted = (int)($skuRow['is_deleted'] ?? 0);
+                                
+                                if ($is_deleted) {
+                                    // Restore soft-deleted item
+                                    try {
+                                        $restoreStmt = $db->prepare("UPDATE inventory SET is_deleted = 0 WHERE id = :id");
+                                        $restoreStmt->execute([':id' => $found_id]);
+                                        $inventory_id = $found_id;
+                                        error_log("Restored soft-deleted inventory item ID {$found_id} for SKU {$sku}");
+                                    } catch (Throwable $e) {
+                                        error_log("Warning: Could not restore soft-deleted inventory item: " . $e->getMessage());
+                                        $inventory_id = null;
+                                    }
+                                } else {
+                                    $inventory_id = $found_id;
+                                }
+                                
+                                // Update source_inventory_id link
+                                if ($inventory_id) {
                                     try {
                                         $update_cat = $db->prepare("UPDATE supplier_catalog SET source_inventory_id = :inv_id WHERE id = :cat_id");
                                         $update_cat->execute([':inv_id' => $inventory_id, ':cat_id' => $catalog_id]);
                                     } catch (Throwable $e) {
                                         error_log("Warning: Could not update source_inventory_id: " . $e->getMessage());
                                     }
-                                } else {
-                                    error_log("Warning: SKU {$sku} exists for another supplier. Cannot create duplicate inventory item.");
-                                    $message     = "SKU '{$sku}' already exists in inventory for another supplier. Cannot create order.";
-                                    $messageType = 'danger';
-                                    break;
                                 }
                             } else {
-                                // SKU doesn't exist - create new inventory item
+                                // SKU doesn't exist for this supplier - create new inventory item
+                                // Note: SKU can exist for other suppliers - that's OK due to unique constraint on (supplier_id, sku)
                                 $inventory->sku = $sku;
                                 $inventory->name = $cat_data['name'];
                                 $inventory->description = $cat_data['description'] ?? '';
@@ -313,35 +382,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                                 $inventory->supplier_id = $supplier_id;
                                 
                                 if ($inventory->createForSupplier($supplier_id)) {
-                                    $inventory_id = (int)$db->lastInsertId();
+                                    $new_inventory_id = (int)$db->lastInsertId();
                                     
-                                    // Update supplier_catalog with source_inventory_id
-                                    try {
-                                        $update_cat = $db->prepare("UPDATE supplier_catalog SET source_inventory_id = :inv_id WHERE id = :cat_id");
-                                        $update_cat->execute([':inv_id' => $inventory_id, ':cat_id' => $catalog_id]);
-                                    } catch (Throwable $e) {
-                                        error_log("Warning: Could not update source_inventory_id: " . $e->getMessage());
-                                    }
-                                    
-                                    // Sync variations from supplier_product_variations
-                                    if (method_exists($spVariation, 'getByProduct')) {
-                                        $variants = $spVariation->getByProduct($catalog_id);
-                                        if (is_array($variants)) {
-                                            foreach ($variants as $vr) {
-                                                $variation = $vr['variation'] ?? '';
-                                                if ($variation === '') { continue; }
-                                                $unitType = $vr['unit_type'] ?? ($cat_data['unit_type'] ?? 'per piece');
-                                                $price = isset($vr['unit_price']) && $vr['unit_price'] !== null ? (float)$vr['unit_price'] : null;
-                                                if (method_exists($invVariation, 'createVariant')) {
-                                                    $invVariation->createVariant($inventory_id, $variation, $unitType, 0, $price);
+                                    // CRITICAL: Verify the inventory item was actually created
+                                    if ($new_inventory_id <= 0) {
+                                        error_log("ERROR: createForSupplier returned true but lastInsertId is invalid ({$new_inventory_id}) for SKU {$sku}");
+                                        $inventory_id = null;
+                                    } else {
+                                        // Verify the item exists in the database
+                                        $verifyStmt = $db->prepare("SELECT id FROM inventory WHERE id = :id AND COALESCE(is_deleted, 0) = 0 LIMIT 1");
+                                        $verifyStmt->execute([':id' => $new_inventory_id]);
+                                        $verifyRow = $verifyStmt->fetch(PDO::FETCH_ASSOC);
+                                        
+                                        if ($verifyRow) {
+                                            $inventory_id = $new_inventory_id;
+                                            
+                                            // Update supplier_catalog with source_inventory_id
+                                            try {
+                                                $update_cat = $db->prepare("UPDATE supplier_catalog SET source_inventory_id = :inv_id WHERE id = :cat_id");
+                                                $update_cat->execute([':inv_id' => $inventory_id, ':cat_id' => $catalog_id]);
+                                            } catch (Throwable $e) {
+                                                error_log("Warning: Could not update source_inventory_id: " . $e->getMessage());
+                                            }
+                                            
+                                            // Sync variations from supplier_product_variations
+                                            if (method_exists($spVariation, 'getByProduct')) {
+                                                $variants = $spVariation->getByProduct($catalog_id);
+                                                if (is_array($variants)) {
+                                                    foreach ($variants as $vr) {
+                                                        $variation = $vr['variation'] ?? '';
+                                                        if ($variation === '') { continue; }
+                                                        $unitType = $vr['unit_type'] ?? ($cat_data['unit_type'] ?? 'per piece');
+                                                        $price = isset($vr['unit_price']) && $vr['unit_price'] !== null ? (float)$vr['unit_price'] : null;
+                                                        if (method_exists($invVariation, 'createVariant')) {
+                                                            $invVariation->createVariant($inventory_id, $variation, $unitType, 0, $price);
+                                                        }
+                                                    }
                                                 }
                                             }
+                                            
+                                            error_log("Success: Created inventory item for product '{$cat_data['name']}' (SKU: {$sku}, Inventory ID: {$inventory_id}) during order placement - Product is now available");
+                                        } else {
+                                            error_log("ERROR: Inventory item created (ID: {$new_inventory_id}) but not found in database for SKU {$sku}");
+                                            $inventory_id = null;
                                         }
                                     }
-                                    
-                                    error_log("Success: Created inventory item for product '{$cat_data['name']}' (SKU: {$sku}) during order placement - Product is now available");
                                 } else {
-                                    error_log("ERROR: Failed to create inventory item for SKU {$sku} during order placement");
+                                    error_log("ERROR: Failed to create inventory item for SKU {$sku} during order placement - createForSupplier returned false");
+                                    $inventory_id = null;
                                 }
                             }
                         } catch (Throwable $e) {
@@ -375,12 +463,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     }
                     
                     // Get item details for price calculation (from inventory for consistency)
-                    $item_stmt = $db->prepare("SELECT name, category, unit_price FROM inventory WHERE id = :id");
+                    // CRITICAL: Also check is_deleted to ensure item is active
+                    $item_stmt = $db->prepare("SELECT name, category, unit_price FROM inventory WHERE id = :id AND COALESCE(is_deleted, 0) = 0");
                     $item_stmt->execute([':id' => $inventory_id]);
                     $item_data = $item_stmt->fetch(PDO::FETCH_ASSOC);
                     
                     if (!$item_data) {
-                        $message     = "Failed to find inventory item for product ID {$catalog_id}.";
+                        $sku = trim($cat_data['sku'] ?? '');
+                        $productName = $cat_data['name'] ?? 'Unknown';
+                        error_log("ERROR: Inventory item not found after creation/verification. Inventory ID: {$inventory_id}, Catalog ID: {$catalog_id}, SKU: " . ($sku ?: 'EMPTY') . ", Product: {$productName}");
+                        
+                        // Try to get more details about why it failed
+                        $debugStmt = $db->prepare("SELECT id, sku, name, is_deleted FROM inventory WHERE id = :id");
+                        $debugStmt->execute([':id' => $inventory_id]);
+                        $debugRow = $debugStmt->fetch(PDO::FETCH_ASSOC);
+                        
+                        if ($debugRow) {
+                            $isDeleted = (int)($debugRow['is_deleted'] ?? 0);
+                            if ($isDeleted) {
+                                $message = "Inventory item for product '{$productName}' (ID: {$inventory_id}) was found but is marked as deleted. Please contact support.";
+                            } else {
+                                $message = "Inventory item for product '{$productName}' (ID: {$inventory_id}) exists but query failed. Please refresh and try again.";
+                            }
+                        } else {
+                            $message = "Failed to find inventory item for product '{$productName}' (Catalog ID: {$catalog_id}). The item may not have been created successfully. Please refresh the page and try again.";
+                        }
                         $messageType = 'danger';
                         break;
                     }
@@ -490,6 +597,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         break;
                     } else {
                         error_log("Order created successfully in both tables - orders table ID: $order_id, admin_orders table ID: $admin_order_id");
+                    }
+                    
+                    // Create notification for supplier about new order
+                    try {
+                        $selectedItemName = $cat_data['name'] ?? 'Item';
+                        $decoratedName = $selectedItemName;
+                        if (!empty($orderData['unit_type']) || !empty($orderData['variation'])) {
+                            $parts = [];
+                            if (!empty($orderData['unit_type'])) { $parts[] = $orderData['unit_type']; }
+                            if (!empty($orderData['variation'])) { $parts[] = $orderData['variation']; }
+                            $decoratedName = $selectedItemName . ' (' . implode(' / ', $parts) . ')';
+                        }
+                        
+                        $notification->createOrderNotification(
+                            $order_id,
+                            $supplier_id,
+                            $decoratedName,
+                            $qty
+                        );
+                        error_log("Notification created for supplier {$supplier_id} about order {$order_id}");
+                    } catch (Throwable $e) {
+                        error_log("Warning: Failed to create notification for order {$order_id}: " . $e->getMessage());
+                        // Non-fatal - continue with order processing
                     }
                     
                     $order_ids[] = $order_id;
@@ -675,11 +805,97 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     }
 }
 
+// ===== FORCE SYNC: Ensure ALL products from supplier_catalog are in inventory BEFORE display =====
+// This ensures every product from supplier/products.php is available for ordering
+try {
+    $forceSyncStmt = $db->prepare("SELECT * FROM supplier_catalog WHERE supplier_id = :sid AND COALESCE(is_deleted, 0) = 0");
+    $forceSyncStmt->execute([':sid' => $supplier_id]);
+    $forceSyncProducts = $forceSyncStmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    foreach ($forceSyncProducts as $syncCat) {
+        $syncSku = trim($syncCat['sku'] ?? '');
+        $syncCatalogId = (int)$syncCat['id'];
+        
+        // Generate SKU if empty
+        if (empty($syncSku)) {
+            $generatedSku = 'AUTO-' . $supplier_id . '-' . $syncCatalogId;
+            try {
+                $updateSkuStmt = $db->prepare("UPDATE supplier_catalog SET sku = :sku WHERE id = :id");
+                $updateSkuStmt->execute([':sku' => $generatedSku, ':id' => $syncCatalogId]);
+                $syncSku = $generatedSku;
+            } catch (Exception $e) {
+                error_log("Warning: Could not generate SKU for catalog ID {$syncCatalogId}: " . $e->getMessage());
+            }
+        }
+        
+        if (!empty($syncSku)) {
+            // Check if inventory item exists
+            $syncCheckStmt = $db->prepare("SELECT id FROM inventory WHERE sku = :sku AND supplier_id = :sid LIMIT 1");
+            $syncCheckStmt->execute([':sku' => $syncSku, ':sid' => $supplier_id]);
+            $syncExisting = $syncCheckStmt->fetch(PDO::FETCH_ASSOC);
+            
+            if (!$syncExisting) {
+                // Create inventory item if it doesn't exist
+                try {
+                    $inventory->sku = $syncSku;
+                    $inventory->name = $syncCat['name'] ?? '';
+                    $inventory->description = $syncCat['description'] ?? '';
+                    $inventory->quantity = 0;
+                    $inventory->reorder_threshold = isset($syncCat['reorder_threshold']) ? (int)$syncCat['reorder_threshold'] : 10;
+                    $inventory->category = $syncCat['category'] ?? '';
+                    $inventory->unit_price = isset($syncCat['unit_price']) ? (float)$syncCat['unit_price'] : 0.0;
+                    $inventory->location = $syncCat['location'] ?? '';
+                    $inventory->supplier_id = $supplier_id;
+                    
+                    if ($inventory->createForSupplier($supplier_id)) {
+                        $newSyncInvId = (int)$db->lastInsertId();
+                        if ($newSyncInvId > 0) {
+                            // Update source_inventory_id
+                            $updateLinkStmt = $db->prepare("UPDATE supplier_catalog SET source_inventory_id = :inv_id WHERE id = :cat_id");
+                            $updateLinkStmt->execute([':inv_id' => $newSyncInvId, ':cat_id' => $syncCatalogId]);
+                            
+                            // Sync variations
+                            $syncVariants = $spVariation->getByProduct($syncCatalogId);
+                            if (is_array($syncVariants)) {
+                                foreach ($syncVariants as $svr) {
+                                    $syncVar = $svr['variation'] ?? '';
+                                    if (empty($syncVar)) continue;
+                                    $syncUnitType = $svr['unit_type'] ?? ($syncCat['unit_type'] ?? 'per piece');
+                                    $syncPrice = isset($svr['unit_price']) && $svr['unit_price'] !== null ? (float)$svr['unit_price'] : null;
+                                    if (method_exists($invVariation, 'createVariant')) {
+                                        $invVariation->createVariant($newSyncInvId, $syncVar, $syncUnitType, 0, $syncPrice);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception $e) {
+                    error_log("Warning: Force sync failed for catalog ID {$syncCatalogId}: " . $e->getMessage());
+                }
+            } else {
+                // Update source_inventory_id link if missing
+                $syncInvId = (int)$syncExisting['id'];
+                if (empty($syncCat['source_inventory_id']) || (int)$syncCat['source_inventory_id'] !== $syncInvId) {
+                    try {
+                        $updateLinkStmt = $db->prepare("UPDATE supplier_catalog SET source_inventory_id = :inv_id WHERE id = :cat_id");
+                        $updateLinkStmt->execute([':inv_id' => $syncInvId, ':cat_id' => $syncCatalogId]);
+                    } catch (Exception $e) {
+                        error_log("Warning: Could not update source_inventory_id for catalog ID {$syncCatalogId}: " . $e->getMessage());
+                    }
+                }
+            }
+        }
+    }
+} catch (Exception $e) {
+    error_log("Warning: Force sync process failed: " . $e->getMessage());
+}
+
 // Fetch products from supplier_catalog (EXACTLY matching supplier/products.php database query)
 // This connects supplier_details.php directly to the same database source as supplier/products.php
 $items = [];
 // Use direct SQL query matching supplier/products.php pattern: readBySupplier + filter is_deleted = 0
 // This ensures both pages query the exact same data from the database
+// CRITICAL: Show ALL products, even those without SKU (they will be handled during ordering)
 $catStmt = $db->prepare("SELECT * FROM supplier_catalog WHERE supplier_id = :sid AND COALESCE(is_deleted, 0) = 0 ORDER BY name");
 $catStmt->execute([':sid' => $supplier_id]);
 
@@ -1047,6 +1263,7 @@ usort($categories, fn($a,$b) => strcasecmp($a['label'],$b['label']));
                 <div class="d-flex flex-wrap align-items-center justify-content-between">
                     <h5 class="mb-2 mb-md-0 text-gray-800">
                         <i class="bi bi-grid-3x3-gap me-2"></i>Products
+                        <span class="badge bg-primary ms-2"><?php echo count($items); ?> items</span>
                     </h5>
                     <div class="search-container">
                         <div class="input-group" style="max-width:300px;">
@@ -1075,6 +1292,18 @@ usort($categories, fn($a,$b) => strcasecmp($a['label'],$b['label']));
                 </div>
             </div>
             <div class="card-body">
+                <?php if (empty($items)): ?>
+                    <div class="alert alert-info text-center">
+                        <i class="bi bi-inbox me-2"></i>
+                        No products found for this supplier. Products from supplier/products.php will appear here once they are added.
+                    </div>
+                <?php else: ?>
+                    <div class="alert alert-success alert-dismissible fade show" role="alert">
+                        <i class="bi bi-check-circle me-2"></i>
+                        <strong><?php echo count($items); ?> product(s)</strong> loaded from supplier catalog. All products are synced to inventory and ready for ordering.
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                <?php endif; ?>
                 <div class="product-grid" id="productContainer">
                     <?php foreach ($items as $row): 
                         $img = trim($row['image_url'] ?? '');
@@ -1127,15 +1356,19 @@ usort($categories, fn($a,$b) => strcasecmp($a['label'],$b['label']));
                                 <div class="d-flex justify-content-between align-items-center mb-3">
                                     <span class="h5 text-primary mb-0 price-display" id="priceDisplay_<?= (int)$row['id'] ?>">₱<?= number_format((float)$row['unit_price'], 2) ?> <small class="text-muted">(<?= htmlspecialchars($defaultUnit) ?>)</small></span>
                                 </div>
-                                <?php if (!empty($variantList)): ?>
-                                <div class="mb-3">
-                                    <div class="d-flex justify-content-between align-items-center mb-2">
-                                        <small class="fw-semibold text-dark"><i class="bi bi-sliders me-1"></i>Select Options:</small>
-                                        <small class="text-muted"><i class="bi bi-info-circle me-1"></i>Price varies by selection</small>
+                                <?php 
+                                    $hasVarMaps = (!empty($varUnitTypes) || !empty($varPrices) || !empty($varStocks));
+                                    $hasVariations = (!empty($variantList) || $hasVarMaps);
+                                ?>
+                                <?php if ($hasVariations): ?>
+                                    <div class="mb-3">
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <small class="fw-semibold text-dark"><i class="bi bi-sliders me-1"></i>Select Options:</small>
+                                            <small class="text-muted"><i class="bi bi-info-circle me-1"></i>Price varies by selection</small>
+                                        </div>
+                                        <div class="variation-attrs" data-auto-build="1"></div>
+                                        <div class="variation-status small mt-2 text-muted"></div>
                                     </div>
-                                    <div class="variation-attrs" data-auto-build="1"></div>
-                                    <div class="variation-status small mt-2 text-muted"></div>
-                                </div>
                                 <?php endif; ?>
                                 <?php /* Removed explicit Size (mm) selector; size handled internally via variants */ ?>
                                 <div class="quantity-controls mb-3">

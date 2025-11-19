@@ -16,14 +16,21 @@ include_once '../config/session.php';   // namespaced sessions (admin/staff)
 require_once '../config/database.php';  // DB connection
 require_once '../models/alert_log.php';
 require_once '../models/inventory_variation.php';
+// Supplier catalog models for mirroring
+require_once '../models/supplier_catalog.php';
+require_once '../models/supplier_product_variation.php';
 
 // Load all model classes this page uses
 require_once '../models/inventory.php';
 require_once '../models/supplier.php';
 require_once '../models/order.php';
+require_once '../models/admin_order.php';
+require_once '../models/payment.php';
+require_once '../models/delivery.php';
 require_once '../models/sales_transaction.php';
 require_once '../models/alert_log.php';
 // If your dashboard uses more models, include them here with require_once
+require_once '../models/stock_calculator.php';
 
 // ---- Admin auth guard (namespaced) ----
 if (empty($_SESSION['admin']['user_id'])) {
@@ -58,9 +65,13 @@ try {
 $inventory  = new Inventory($db);
 $supplier   = new Supplier($db);
 $order      = new Order($db);
+$adminOrder = new AdminOrder($db);
+$paymentModel = new Payment($db);
+$deliveryModel = new Delivery($db);
 $sales      = new SalesTransaction($db);
 $alert      = new AlertLog($db);
 $invVariation = new InventoryVariation($db);
+$adminId = (int)($_SESSION['admin']['user_id'] ?? 0);
 
 // Initialize unit type and variation mappings for admin inventory
 require_once '../lib/unit_variations.php';
@@ -79,107 +90,59 @@ try {
     }
 } catch (Throwable $e) { /* best-effort; non-fatal if unit_types is empty */ }
 
-// --- Preflight: Clean up duplicates in inventory ---
+// --- Preflight: mirror missing supplier_catalog records into inventory ---
 try {
-    $db->beginTransaction();
-    
-    // 1. Remove products without SKU (empty or null)
-    $deletedNoSku = $db->exec("DELETE FROM inventory WHERE (sku IS NULL OR sku = '') AND COALESCE(is_deleted, 0) = 0");
-    if ($deletedNoSku > 0) {
-        error_log("Cleaned up {$deletedNoSku} inventory items without SKU");
-    }
-    
-    // 2. Remove duplicate products with same SKU + supplier_id (keep the oldest one, delete newer duplicates)
-    // First, get all duplicates grouped by SKU + supplier_id
-    $duplicatesStmt = $db->query("
-        SELECT sku, supplier_id, COUNT(*) as cnt, MIN(id) as keep_id, GROUP_CONCAT(id ORDER BY id) as all_ids
-        FROM inventory 
-        WHERE sku IS NOT NULL AND sku != '' AND supplier_id IS NOT NULL AND COALESCE(is_deleted, 0) = 0
-        GROUP BY sku, supplier_id 
-        HAVING cnt > 1
-    ");
-    
-    $duplicatesDeleted = 0;
-    while ($dup = $duplicatesStmt->fetch(PDO::FETCH_ASSOC)) {
-        $keepId = (int)$dup['keep_id'];
-        $allIds = explode(',', $dup['all_ids']);
-        $idsToDelete = array_filter($allIds, function($id) use ($keepId) {
-            return (int)$id !== $keepId;
-        });
-        
-        if (!empty($idsToDelete)) {
-            // Delete inventory variations for duplicates first
-            $placeholders = implode(',', array_fill(0, count($idsToDelete), '?'));
+    // Ensure supplier_catalog table exists
+    $hasCatalog = (bool)$db->query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'supplier_catalog'")->fetchColumn();
+    if ($hasCatalog) {
+        // Find supplier catalog products without corresponding inventory rows (by SKU + supplier_id)
+        $sql = "SELECT sc.*
+                FROM supplier_catalog sc
+                LEFT JOIN inventory i ON i.sku = sc.sku AND i.supplier_id = sc.supplier_id
+                WHERE sc.is_deleted = 0 AND i.id IS NULL";
+        $missingStmt = $db->prepare($sql);
+        $missingStmt->execute();
+        $spv = new SupplierProductVariation($db);
+        while ($sc = $missingStmt->fetch(PDO::FETCH_ASSOC)) {
+            // Skip if global SKU already exists in inventory to avoid conflicts
+            if ($inventory->skuExists($sc['sku'])) { continue; }
+            // Create inventory item for this supplier catalog record
+            $inventory->sku = $sc['sku'];
+            $inventory->name = $sc['name'];
+            $inventory->description = $sc['description'] ?? '';
+            $inventory->quantity = 0;
+            $inventory->reorder_threshold = isset($sc['reorder_threshold']) ? (int)$sc['reorder_threshold'] : 0;
+            $inventory->category = $sc['category'] ?? '';
+            $inventory->unit_price = isset($sc['unit_price']) ? (float)$sc['unit_price'] : 0;
+            $inventory->location = $sc['location'] ?? '';
+            $supplierId = (int)$sc['supplier_id'];
+
+            $db->beginTransaction();
             try {
-                $delVarsStmt = $db->prepare("DELETE FROM inventory_variations WHERE inventory_id IN ($placeholders)");
-                $delVarsStmt->execute($idsToDelete);
-            } catch (Exception $e) {
-                error_log("Warning: Could not delete variations for duplicate inventory items: " . $e->getMessage());
+                if (!$inventory->createForSupplier($supplierId)) { throw new Exception('createForSupplier failed'); }
+                $newInvId = (int)$db->lastInsertId();
+                // Mirror variations from supplier_product_variations
+                $variants = $spv->getByProduct((int)$sc['id']);
+                foreach ($variants as $vr) {
+                    $vt = $vr['unit_type'] ?? ($sc['unit_type'] ?? 'per piece');
+                    $price = isset($vr['unit_price']) ? (float)$vr['unit_price'] : null;
+                    $invVariation->createVariant($newInvId, $vr['variation'], $vt, 0, $price);
+                }
+                $db->commit();
+            } catch (Throwable $e) {
+                if ($db->inTransaction()) { $db->rollBack(); }
+                // Continue with next item on failure
             }
-            
-            // Delete duplicate inventory items (keep the oldest one)
-            $delStmt = $db->prepare("DELETE FROM inventory WHERE id IN ($placeholders)");
-            $delStmt->execute($idsToDelete);
-            $duplicatesDeleted += $delStmt->rowCount();
         }
-    }
-    
-    if ($duplicatesDeleted > 0) {
-        error_log("Cleaned up {$duplicatesDeleted} duplicate inventory items (same SKU + supplier_id)");
-    }
-    
-    // 3. Remove products with duplicate SKU but no supplier_id (keep one, delete others)
-    $duplicatesNoSupplierStmt = $db->query("
-        SELECT sku, COUNT(*) as cnt, MIN(id) as keep_id, GROUP_CONCAT(id ORDER BY id) as all_ids
-        FROM inventory 
-        WHERE sku IS NOT NULL AND sku != '' AND supplier_id IS NULL AND COALESCE(is_deleted, 0) = 0
-        GROUP BY sku 
-        HAVING cnt > 1
-    ");
-    
-    $duplicatesNoSupplierDeleted = 0;
-    while ($dup = $duplicatesNoSupplierStmt->fetch(PDO::FETCH_ASSOC)) {
-        $keepId = (int)$dup['keep_id'];
-        $allIds = explode(',', $dup['all_ids']);
-        $idsToDelete = array_filter($allIds, function($id) use ($keepId) {
-            return (int)$id !== $keepId;
-        });
-        
-        if (!empty($idsToDelete)) {
-            // Delete inventory variations for duplicates first
-            $placeholders = implode(',', array_fill(0, count($idsToDelete), '?'));
-            try {
-                $delVarsStmt = $db->prepare("DELETE FROM inventory_variations WHERE inventory_id IN ($placeholders)");
-                $delVarsStmt->execute($idsToDelete);
-            } catch (Exception $e) {
-                error_log("Warning: Could not delete variations for duplicate inventory items: " . $e->getMessage());
-            }
-            
-            // Delete duplicate inventory items
-            $delStmt = $db->prepare("DELETE FROM inventory WHERE id IN ($placeholders)");
-            $delStmt->execute($idsToDelete);
-            $duplicatesNoSupplierDeleted += $delStmt->rowCount();
-        }
-    }
-    
-    if ($duplicatesNoSupplierDeleted > 0) {
-        error_log("Cleaned up {$duplicatesNoSupplierDeleted} duplicate inventory items (same SKU, no supplier_id)");
-    }
-    
-    $db->commit();
-    
-    if ($deletedNoSku > 0 || $duplicatesDeleted > 0 || $duplicatesNoSupplierDeleted > 0) {
-        error_log("Inventory cleanup completed: Removed {$deletedNoSku} items without SKU, {$duplicatesDeleted} duplicates with supplier_id, {$duplicatesNoSupplierDeleted} duplicates without supplier_id");
     }
 } catch (Throwable $e) {
-    if ($db->inTransaction()) { $db->rollBack(); }
-    error_log("Warning: Inventory cleanup failed: " . $e->getMessage());
+    // Ignore preflight sync errors
 }
 
-// NOTE: Inventory now ONLY shows products from completed orders in admin/orders.php
-// Products from supplier/products.php are NOT synced to inventory
-// They only appear in supplier/supplier_details.php
-// All inventory data comes from completed orders in admin_orders table
+// ====== (Keep your existing page logic below) ======
+// From here down, keep your original code (queries, computations, HTML).
+// For example, if you previously computed variables like $total_inventory,
+// $total_suppliers, $pending_orders, etc., leave that logic as-is.
 
 
 
@@ -191,6 +154,61 @@ $suppliers = $supplier->readAll();
 $suppliersArr = [];
 while ($row = $suppliers->fetch(PDO::FETCH_ASSOC)) {
     $suppliersArr[] = $row;
+}
+
+// AJAX: Update inventory attributes with validation and admin auth
+if ($_SERVER['REQUEST_METHOD'] === 'POST' 
+    && isset($_POST['action']) 
+    && $_POST['action'] === 'update_inventory'
+) {
+    header('Content-Type: application/json');
+    if (empty($_SESSION['admin']['user_id'])) {
+        echo json_encode(['success' => false, 'message' => 'Unauthorized']);
+        exit;
+    }
+    $csrfToken = $_POST['csrf_token'] ?? '';
+    if (!isset($_SESSION['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $csrfToken)) {
+        echo json_encode(['success' => false, 'message' => 'Invalid CSRF token']);
+        exit;
+    }
+    $id = isset($_POST['id']) ? (int)$_POST['id'] : 0;
+    $sku = isset($_POST['sku']) ? trim((string)$_POST['sku']) : '';
+    $name = isset($_POST['name']) ? trim((string)$_POST['name']) : '';
+    $category = isset($_POST['category']) ? trim((string)$_POST['category']) : '';
+    $description = isset($_POST['description']) ? trim((string)$_POST['description']) : '';
+    $location = isset($_POST['location']) ? trim((string)$_POST['location']) : '';
+    $reorder = isset($_POST['reorder_threshold']) ? (int)$_POST['reorder_threshold'] : 0;
+    if ($id <= 0 || $sku === '' || $name === '' || $reorder < 0) {
+        echo json_encode(['success' => false, 'message' => 'Invalid input']);
+        exit;
+    }
+    try {
+        $db->beginTransaction();
+        $inventory->id = $id;
+        if (!$inventory->readOne()) {
+            $db->rollBack();
+            echo json_encode(['success' => false, 'message' => 'Item not found']);
+            exit;
+        }
+        // Update editable fields only; preserve quantity/unit_price/supplier_id
+        $inventory->sku = $sku;
+        $inventory->name = $name;
+        $inventory->description = $description;
+        $inventory->reorder_threshold = $reorder;
+        $inventory->category = $category;
+        $inventory->location = $location;
+        if (!$inventory->update()) {
+            $db->rollBack();
+            echo json_encode(['success' => false, 'message' => 'Update failed']);
+            exit;
+        }
+        $db->commit();
+        echo json_encode(['success' => true, 'id' => $id]);
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) { $db->rollBack(); }
+        echo json_encode(['success' => false, 'message' => 'Database error: ' . $e->getMessage()]);
+    }
+    exit;
 }
 
 // Process form submission
@@ -312,40 +330,300 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     exit;
                 }
             }
-            // Update inventory item - only reorder threshold
-            elseif ($_POST['action'] === 'update') {
-                // Only allow editing reorder threshold to avoid duplication and source type changes
-                $inventory->id = (int)($_POST['id'] ?? 0);
-                $reorder_threshold = $_POST['reorder_threshold'] ?? 0;
+            // Restore archived inventory item
+            elseif ($_POST['action'] === 'restore') {
+                $item_id = (int)($_POST['id'] ?? 0);
+                $item_name = trim($_POST['name'] ?? '');
 
-                // Validate reorder threshold
-                if (!is_numeric($reorder_threshold) || (int)$reorder_threshold < 0) {
+                if ($item_id <= 0) {
+                    $message = "Invalid item ID.";
+                        $messageType = "danger";
+                    } else {
+                    try {
+                        // Check if is_deleted column exists
+                        $hasDeletedCol = false;
+                            try {
+                            $stmt = $db->prepare("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'inventory' AND COLUMN_NAME = 'is_deleted'");
+                            $stmt->execute();
+                            $hasDeletedCol = $stmt->fetchColumn() > 0;
+                        } catch (Exception $e) { 
+                            $hasDeletedCol = false; 
+                        }
+                        
+                        if (!$hasDeletedCol) {
+                            $message = "Archive functionality is not available.";
+                            $messageType = "warning";
+                        } else {
+                            // Verify item exists and is archived
+                            $checkStmt = $db->prepare("SELECT id, name, is_deleted FROM inventory WHERE id = ?");
+                            $checkStmt->execute([$item_id]);
+                            $existing_item = $checkStmt->fetch(PDO::FETCH_ASSOC);
+                            
+                            if (!$existing_item) {
+                                $message = "Item not found.";
+                                $messageType = "danger";
+                            } else if ((int)($existing_item['is_deleted'] ?? 0) === 0) {
+                                $message = "Item is not archived.";
+                                $messageType = "warning";
+                            } else {
+                                // Restore the item (set is_deleted = 0)
+                                $restoreStmt = $db->prepare("UPDATE inventory SET is_deleted = 0 WHERE id = ?");
+                                $restored = $restoreStmt->execute([$item_id]);
+                                
+                                if ($restored) {
+                                    $restoredName = $existing_item['name'];
+                                    $message = "Inventory item '{$restoredName}' was restored successfully.";
+                                    $messageType = "success";
+                                    
+                                    // Redirect to active view after restore
+                                    header("Location: inventory.php");
+                                    exit();
+                                } else {
+                                    $message = "Unable to restore inventory item.";
+                                    $messageType = "danger";
+                                }
+                                        }
+                                    }
+                    } catch (Exception $e) {
+                        $message = "Error restoring item: " . $e->getMessage();
+                            $messageType = "danger";
+                    }
+                }
+            }
+            // Update inventory item
+            elseif ($_POST['action'] === 'update') {
+                // Basic input validation and normalization
+                $inventory->id = (int)($_POST['id'] ?? 0);
+                $sku = trim($_POST['sku'] ?? '');
+                $name = trim($_POST['name'] ?? '');
+                $description = trim($_POST['description'] ?? '');
+                // Quantity is now variation-based; keep base quantity neutral
+                $quantity = 0;
+                $reorder_threshold = $_POST['reorder_threshold'] ?? 0;
+                $category = trim($_POST['category'] ?? '');
+                // Unit price is variation-based; keep base price neutral
+                $unit_price = 0;
+                $location = trim($_POST['location'] ?? '');
+
+                // Enforce admin-side independence: never link to supplier_id
+                $inventory->supplier_id = null;
+
+                // Validate required fields
+                if ($sku === '' || $name === '') {
+                    $message = "Error: SKU and Name are required.";
+                    $messageType = "danger";
+                }
+                // Skip base unit price and base quantity validation (variation-driven)
+                else if (!is_numeric($reorder_threshold) || (int)$reorder_threshold < 0) {
                     $message = "Error: Reorder threshold must be a non-negative integer.";
                     $messageType = "danger";
                 }
                 else {
+                    $inventory->sku = $sku;
+                    $inventory->name = $name;
+                    $inventory->description = $description;
+                    // Base quantity held at 0; stock tracked per variation
+                    $inventory->quantity = 0;
+                    $inventory->reorder_threshold = (int)$reorder_threshold;
+                    $inventory->category = $category;
+                    // Base unit price held at 0; price tracked per variation
+                    $inventory->unit_price = 0.0;
+                    $inventory->location = $location;
+
+                    // Normalize and validate unit_type
+                    $unit_type_input = isset($_POST['unit_type']) ? strtolower(trim($_POST['unit_type'])) : 'per piece';
+                    $valid_unit_types = ['per piece','per kilo','per box','per meter','per gallon','per bag','per sheet'];
+                    if (!in_array($unit_type_input, $valid_unit_types, true)) {
+                        $unit_type_input = 'per piece';
+                    }
+                    
                     try {
                         $db->beginTransaction();
-                        
-                        // Get current inventory item to preserve supplier_id and other fields
-                        $currentStmt = $db->prepare("SELECT supplier_id FROM inventory WHERE id = ?");
-                        $currentStmt->execute([(int)$inventory->id]);
-                        $current = $currentStmt->fetch(PDO::FETCH_ASSOC);
-                        
-                        if (!$current) {
-                            throw new Exception("Inventory item not found.");
-                        }
-                        
-                        // Only update reorder threshold, preserve supplier_id to maintain source type
-                        $updateStmt = $db->prepare("UPDATE inventory SET reorder_threshold = ? WHERE id = ?");
-                        if ($updateStmt->execute([(int)$reorder_threshold, (int)$inventory->id])) {
+                        // Row-level lock to serialize concurrent updates
+                        try {
+                            $lock = $db->prepare("SELECT id FROM inventory WHERE id = ? FOR UPDATE");
+                            $lock->execute([(int)$inventory->id]);
+                        } catch (Throwable $e) { /* proceed even if lock fails */ }
+                        if ($inventory->update()) {
+                            // Propagate unit type to all variations for this inventory
+                            try {
+                                $stmtUT = $db->prepare("UPDATE inventory_variations SET unit_type = :ut WHERE inventory_id = :iid");
+                                $stmtUT->execute([':ut' => $unit_type_input, ':iid' => (int)$inventory->id]);
+                            } catch (Exception $e) {
+                                // ignore if table missing
+                            }
+
+                            // Variations seeding on update (adds missing variants only)
+                            $track = isset($_POST['track_variations']);
+                            $variations = isset($_POST['variations']) && is_array($_POST['variations']) ? $_POST['variations'] : [];
+                            $variationPrices = isset($_POST['variation_prices']) && is_array($_POST['variation_prices']) ? $_POST['variation_prices'] : [];
+                            if (empty($variationPrices) && isset($_POST['variation_price_keys']) && is_array($_POST['variation_price_keys']) && isset($_POST['variation_price_vals']) && is_array($_POST['variation_price_vals'])) {
+                                $variationPrices = [];
+                                foreach ($_POST['variation_price_keys'] as $idx => $key) {
+                                    $val = $_POST['variation_price_vals'][$idx] ?? '';
+                                    if ($val !== '') { $variationPrices[$key] = $val; }
+                                }
+                            }
+                            if ($track && !empty($variations)) {
+                                try {
+                                    $invVar = new InventoryVariation($db);
+                                    $existing = $invVar->getStocksMap((int)$inventory->id, $unit_type_input);
+                                    foreach ($variations as $v) {
+                                        if (!isset($existing[$v])) {
+                                            $invVar->createVariant((int)$inventory->id, $v, $unit_type_input, 0);
+                                        }
+                                        if (isset($variationPrices[$v]) && $variationPrices[$v] !== '') {
+                                            $invVar->updatePrice((int)$inventory->id, $v, $unit_type_input, (float)$variationPrices[$v]);
+                                        }
+                                    }
+                                } catch (Exception $e) {}
+                            }
+
+                            // Update unit_type in pending orders for this inventory, if column exists
+                            try {
+                                $checkCol = $db->query("SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'orders' AND column_name = 'unit_type'")->fetchColumn();
+                                if ($checkCol) {
+                                    $stmtOrd = $db->prepare("UPDATE orders SET unit_type = :ut WHERE inventory_id = :iid AND confirmation_status = 'pending'");
+                                    $stmtOrd->execute([':ut' => $unit_type_input, ':iid' => (int)$inventory->id]);
+                                }
+                            } catch (Exception $e) {}
+
+                            // Sync edits to supplier_catalog so they reflect in admin/supplier_details.php
+                            try {
+                                // Find supplier_catalog items linked to this inventory by SKU or source_inventory_id
+                                $invSkuStmt = $db->prepare("SELECT sku, supplier_id FROM inventory WHERE id = ?");
+                                $invSkuStmt->execute([(int)$inventory->id]);
+                                $invData = $invSkuStmt->fetch(PDO::FETCH_ASSOC);
+                                
+                                if ($invData) {
+                                    $invSku = $invData['sku'] ?? '';
+                                    $invSupplierId = isset($invData['supplier_id']) ? (int)$invData['supplier_id'] : 0;
+                                    
+                                    // Update supplier_catalog by SKU and supplier_id
+                                    if ($invSku !== '' && $invSupplierId > 0) {
+                                        $updCatStmt = $db->prepare("UPDATE supplier_catalog SET name = :name, description = :desc, category = :cat, location = :loc WHERE sku = :sku AND supplier_id = :sid");
+                                        $updCatStmt->execute([
+                                            ':name' => $name,
+                                            ':desc' => $description,
+                                            ':cat' => $category,
+                                            ':loc' => $location,
+                                            ':sku' => $invSku,
+                                            ':sid' => $invSupplierId
+                                        ]);
+                                    }
+                                    
+                                    // Also update by source_inventory_id match
+                                    $updCatByInvStmt = $db->prepare("UPDATE supplier_catalog SET name = :name, description = :desc, category = :cat, location = :loc WHERE source_inventory_id = :inv_id");
+                                    $updCatByInvStmt->execute([
+                                        ':name' => $name,
+                                        ':desc' => $description,
+                                        ':cat' => $category,
+                                        ':loc' => $location,
+                                        ':inv_id' => (int)$inventory->id
+                                    ]);
+                                    
+                                    // Sync variation prices to supplier_product_variations
+                                    if (!empty($variations) && !empty($variationPrices)) {
+                                        $catIds = [];
+                                        if ($invSku !== '' && $invSupplierId > 0) {
+                                            $catIdsStmt = $db->prepare("SELECT id FROM supplier_catalog WHERE sku = :sku AND supplier_id = :sid");
+                                            $catIdsStmt->execute([':sku' => $invSku, ':sid' => $invSupplierId]);
+                                            $catIds = $catIdsStmt->fetchAll(PDO::FETCH_COLUMN);
+                                        }
+                                        $catIdsByInvStmt = $db->prepare("SELECT id FROM supplier_catalog WHERE source_inventory_id = :inv_id");
+                                        $catIdsByInvStmt->execute([':inv_id' => (int)$inventory->id]);
+                                        $catIdsByInv = $catIdsByInvStmt->fetchAll(PDO::FETCH_COLUMN);
+                                        $catIds = array_unique(array_merge($catIds, $catIdsByInv));
+                                        
+                                        if (!empty($catIds)) {
+                                            foreach ($variations as $v) {
+                                                if (isset($variationPrices[$v]) && $variationPrices[$v] !== '') {
+                                                    $varPrice = (float)$variationPrices[$v];
+                                                    foreach ($catIds as $catId) {
+                                                        $updVarPriceStmt = $db->prepare("UPDATE supplier_product_variations SET unit_price = :price WHERE product_id = :cat_id AND variation = :var");
+                                                        $updVarPriceStmt->execute([
+                                                            ':price' => $varPrice,
+                                                            ':cat_id' => (int)$catId,
+                                                            ':var' => $v
+                                                        ]);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } catch (Throwable $e) {
+                                // Log but don't fail - supplier catalog sync is secondary
+                                error_log("Warning: Could not sync inventory edit to supplier_catalog for inventory ID " . (int)$inventory->id . ": " . $e->getMessage());
+                            }
+                            
                             $db->commit();
-                            $message = "Reorder threshold updated successfully.";
+                            $message = "Inventory item was updated successfully.";
                             $messageType = "success";
+                            // Log sync event (update)
+                            try {
+                                $log = $db->prepare("INSERT INTO sync_events (event_type, source_system, target_system, order_id, delivery_id, status_before, status_after, success, message) VALUES (?,?,?,?,?,?,?,?,?)");
+                                $log->execute(['inventory_crud_sync','admin_ui','pos_clients',null,null,'existing','updated',1,'Inventory item updated: ' . $name . ' (ID: ' . (int)$inventory->id . ')']);
+                            } catch (Throwable $e) { /* ignore logging failures */ }
+
+                            // --- Decoupled change tracking: admin-only cache write (supplier isolated) ---
+                            try {
+                                $baseCacheDir = dirname(__DIR__) . '/cache/admin_inventory';
+                                $changesDir = $baseCacheDir . '/changes';
+                                if (!is_dir($changesDir)) {
+                                    @mkdir($changesDir, 0777, true);
+                                }
+                                $versionsFile = $baseCacheDir . '/versions.json';
+                                $versions = [];
+                                if (file_exists($versionsFile)) {
+                                    $raw = file_get_contents($versionsFile);
+                                    $parsed = json_decode($raw, true);
+                                    if (is_array($parsed)) { $versions = $parsed; }
+                                }
+                                $invId = (int)$inventory->id;
+                                $newVersion = isset($versions[$invId]) ? (int)$versions[$invId] + 1 : 1;
+
+                                // Collect current variation prices for tracking
+                                $invVarModel = new InventoryVariation($db);
+                                $variantStmt = $invVarModel->getByInventory($invId);
+                                $variants = [];
+                                if ($variantStmt) {
+                                    while ($vr = $variantStmt->fetch(PDO::FETCH_ASSOC)) {
+                                        $variants[$vr['variation']] = [
+                                            'unit_type' => $vr['unit_type'] ?? $unit_type_input,
+                                            'unit_price' => isset($vr['unit_price']) ? (float)$vr['unit_price'] : null,
+                                            'stock' => isset($vr['stock']) ? (int)$vr['stock'] : null,
+                                            'last_updated' => $vr['last_updated'] ?? null
+                                        ];
+                                    }
+                                }
+
+                                $record = [
+                                    'inventory_id' => $invId,
+                                    'version' => $newVersion,
+                                    'committed' => true,
+                                    'changed_by' => $_SESSION['admin']['user_id'] ?? null,
+                                    'role' => 'admin',
+                                    'timestamp' => date('c'),
+                                    'unit_type' => $unit_type_input,
+                                    'unit_price' => (float)$inventory->unit_price,
+                                    'variants' => $variants
+                                ];
+
+                                @file_put_contents($changesDir . "/inventory_{$invId}.json", json_encode($record, JSON_PRETTY_PRINT));
+                                $versions[$invId] = $newVersion;
+                                @file_put_contents($versionsFile, json_encode($versions, JSON_PRETTY_PRINT));
+                            } catch (Throwable $e) {
+                                // Best-effort cache write; do not affect normal flow
+                            }
                         } else {
                             $db->rollBack();
-                            $message = "Unable to update reorder threshold.";
+                            $message = "Unable to update inventory item.";
                             $messageType = "danger";
+                            try {
+                                $log = $db->prepare("INSERT INTO sync_events (event_type, source_system, target_system, order_id, delivery_id, status_before, status_after, success, message) VALUES (?,?,?,?,?,?,?,?,?)");
+                                $log->execute(['inventory_crud_sync','admin_ui','pos_clients',null,null,'existing','updated',0,'Update failed for item ID ' . (int)$inventory->id]);
+                            } catch (Throwable $e) { }
                         }
                     } catch (Exception $e) {
                         $db->rollBack();
@@ -379,7 +657,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 else {
                     $inventory->id = $item_id;
                     
-                    // Check if item exists in inventory table
+                    // Verify the item exists and get its details
                     $stmt = $db->prepare("SELECT name FROM inventory WHERE id = ?");
                     $stmt->execute([$item_id]);
                     $existing_item = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -388,28 +666,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $message = "Inventory item not found.";
                         $messageType = "danger";
                     }
-                    // CRITICAL: When deleting inventory item, do NOT affect admin_orders table
-                    // Orders in admin/orders.php must remain intact and independent
-                    // Only check for sales transactions to determine if we should archive vs delete
+                    // Proceed without client-supplied name check; use server-fetched record
+                    // Check if item has any orders (pending, confirmed, or cancelled)
                     else {
-                        // Check for sales transactions (these should prevent deletion)
+                        $stmt = $db->prepare("SELECT COUNT(*) as total_orders, 
+                                         SUM(CASE WHEN confirmation_status = 'pending' THEN 1 ELSE 0 END) as pending_orders,
+                                         SUM(CASE WHEN confirmation_status = 'confirmed' THEN 1 ELSE 0 END) as confirmed_orders
+                                         FROM orders WHERE inventory_id = ?");
+                        $stmt->execute([$item_id]);
+                        $order_counts = $stmt->fetch(PDO::FETCH_ASSOC);
+
+                        // Compute delivered orders via deliveries table
+                        $stmt = $db->prepare("SELECT COUNT(*) FROM deliveries d JOIN orders o ON d.order_id = o.id WHERE o.inventory_id = ? AND d.status = 'delivered'");
+                        $stmt->execute([$item_id]);
+                        $delivered_orders = (int)$stmt->fetchColumn();
+                        
+                        // Check for sales transactions
                         $stmt = $db->prepare("SELECT COUNT(*) FROM sales_transactions WHERE inventory_id = ?");
                         $stmt->execute([$item_id]);
                         $sales_count = $stmt->fetchColumn();
                         
-                        // Check if there are completed orders in admin_orders (for informational purposes only)
-                        // We will NOT delete these orders - they remain independent
-                        $adminOrdersStmt = $db->prepare("SELECT COUNT(*) FROM admin_orders WHERE inventory_id = ? AND confirmation_status = 'completed'");
-                        $adminOrdersStmt->execute([$item_id]);
-                        $admin_orders_count = (int)$adminOrdersStmt->fetchColumn();
-                        
                         // Allow force delete to override protection when explicitly requested
                         $forceDelete = isset($_POST['force_delete']) && $_POST['force_delete'] === '1';
-                        
-                        // If there are sales transactions and not force deleting, archive the item
-                        // This preserves sales history while hiding the item
-                        if (!$forceDelete && $sales_count > 0) {
-                            // Soft-delete: archive the item without touching orders or sales history
+                        if (!$forceDelete && (($order_counts['confirmed_orders'] ?? 0) > 0 || $delivered_orders > 0 || $sales_count > 0)) {
+                            // Soft-delete: archive the item without touching order or sales history
                             try {
                                 // Add is_deleted column if it doesn't exist
                                 $hasDeletedCol = false;
@@ -427,10 +707,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                                 $stmt = $db->prepare("UPDATE inventory SET is_deleted = 1 WHERE id = ?");
                                 $stmt->execute([$item_id]);
+                                
+                                // Also soft delete from supplier_catalog (which feeds supplier_details.php)
+                                try {
+                                    $skuStmt = $db->prepare("SELECT sku, supplier_id FROM inventory WHERE id = ?");
+                                    $skuStmt->execute([$item_id]);
+                                    $invData = $skuStmt->fetch(PDO::FETCH_ASSOC);
+                                    
+                                    if ($invData) {
+                                        $sku = $invData['sku'] ?? '';
+                                        $supplier_id = isset($invData['supplier_id']) ? (int)$invData['supplier_id'] : 0;
+                                        
+                                        // Soft delete from supplier_catalog by SKU and supplier_id
+                                        if ($sku !== '' && $supplier_id > 0) {
+                                            $softDelCatStmt = $db->prepare("UPDATE supplier_catalog SET is_deleted = 1 WHERE sku = ? AND supplier_id = ?");
+                                            $softDelCatStmt->execute([$sku, $supplier_id]);
+                                        }
+                                        
+                                        // Also soft delete by source_inventory_id match
+                                        $softDelCatByInvStmt = $db->prepare("UPDATE supplier_catalog SET is_deleted = 1 WHERE source_inventory_id = ?");
+                                        $softDelCatByInvStmt->execute([$item_id]);
+                                    }
+                                } catch (Exception $e) {
+                                    // Log but don't fail - supplier catalog soft delete is secondary
+                                    error_log("Warning: Could not soft delete supplier_catalog for inventory ID {$item_id}: " . $e->getMessage());
+                                }
 
                                 $deletedName = isset($existing_item['name']) ? $existing_item['name'] : $item_name;
-                                $admin_orders_info = $admin_orders_count > 0 ? " ({$admin_orders_count} order(s) in admin/orders.php remain intact)" : "";
-                                $message = "Inventory item '{$deletedName}' was archived and hidden. Sales history retained.{$admin_orders_info}";
+                                $message = "Inventory item '{$deletedName}' was archived and hidden. Order history retained.";
                                 $messageType = "success";
                             } catch (Exception $e) {
                                 $message = "Unable to archive inventory item due to a database error.";
@@ -445,10 +749,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     $lock = $db->prepare("SELECT id FROM inventory WHERE id = ? FOR UPDATE");
                                     $lock->execute([$item_id]);
                                 } catch (Throwable $e) { /* proceed even if lock fails */ }
-                                
-                                // CRITICAL: Do NOT touch admin_orders table
-                                // Orders in admin/orders.php must remain completely independent
-                                // We only clean up inventory-related data, not orders
+                                // If there are pending orders, cancel them automatically before deletion
+                                if ((int)$order_counts['pending_orders'] > 0) {
+                                    $stmt = $db->prepare("UPDATE orders SET confirmation_status = 'cancelled' WHERE inventory_id = ? AND confirmation_status = 'pending'");
+                                    $stmt->execute([$item_id]);
+                                }
+
+                                // Collect target order IDs for this inventory (force delete = all orders)
+                                if ($forceDelete) {
+                                    $stmt = $db->prepare("SELECT id FROM orders WHERE inventory_id = ?");
+                                    $stmt->execute([$item_id]);
+                                } else {
+                                    $stmt = $db->prepare("SELECT id FROM orders WHERE inventory_id = ? AND confirmation_status = 'cancelled'");
+                                    $stmt->execute([$item_id]);
+                                }
+                                $targetOrderIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+                                if (!empty($targetOrderIds)) {
+                                    $placeholders = implode(',', array_fill(0, count($targetOrderIds), '?'));
+
+                                    // Delete notifications referencing these orders
+                                    $stmt = $db->prepare("DELETE FROM notifications WHERE order_id IN ($placeholders)");
+                                    $stmt->execute($targetOrderIds);
+
+                                    // Delete deliveries and payments referencing these orders
+                                    $stmt = $db->prepare("DELETE FROM deliveries WHERE order_id IN ($placeholders)");
+                                    $stmt->execute($targetOrderIds);
+                                    $stmt = $db->prepare("DELETE FROM payments WHERE order_id IN ($placeholders)");
+                                    $stmt->execute($targetOrderIds);
+
+                                    // Delete the target orders
+                                    $stmt = $db->prepare("DELETE FROM orders WHERE id IN ($placeholders)");
+                                    $stmt->execute($targetOrderIds);
+                                }
 
                                 // If force delete, also remove sales transactions for this inventory
                                 if ($forceDelete && (int)$sales_count > 0) {
@@ -476,28 +809,75 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     $stmt->execute([$item_id]);
                                 } catch (Exception $e) {}
 
-                                // Finally delete the inventory item directly
-                                // NOTE: This does NOT affect admin_orders table - orders remain intact
+                                // Also delete from supplier_catalog (which feeds supplier_details.php)
+                                // Find supplier_catalog items linked to this inventory by SKU or source_inventory_id
+                                try {
+                                    // Get SKU of inventory item being deleted
+                                    $skuStmt = $db->prepare("SELECT sku, supplier_id FROM inventory WHERE id = ?");
+                                    $skuStmt->execute([$item_id]);
+                                    $invData = $skuStmt->fetch(PDO::FETCH_ASSOC);
+                                    
+                                    if ($invData) {
+                                        $sku = $invData['sku'] ?? '';
+                                        $supplier_id = isset($invData['supplier_id']) ? (int)$invData['supplier_id'] : 0;
+                                        
+                                        // Get catalog IDs BEFORE deletion for supplier_product_variations cleanup
+                                        $catIds = [];
+                                        if ($sku !== '' && $supplier_id > 0) {
+                                            $catIdsStmt = $db->prepare("SELECT id FROM supplier_catalog WHERE sku = ? AND supplier_id = ?");
+                                            $catIdsStmt->execute([$sku, $supplier_id]);
+                                            $catIds = $catIdsStmt->fetchAll(PDO::FETCH_COLUMN);
+                                        }
+                                        
+                                        // Also get catalog IDs by source_inventory_id
+                                        $catIdsByInvStmt = $db->prepare("SELECT id FROM supplier_catalog WHERE source_inventory_id = ?");
+                                        $catIdsByInvStmt->execute([$item_id]);
+                                        $catIdsByInv = $catIdsByInvStmt->fetchAll(PDO::FETCH_COLUMN);
+                                        $catIds = array_unique(array_merge($catIds, $catIdsByInv));
+                                        
+                                        // Delete associated supplier_product_variations first
+                                        if (!empty($catIds)) {
+                                            $placeholders = implode(',', array_fill(0, count($catIds), '?'));
+                                            $delVarStmt = $db->prepare("DELETE FROM supplier_product_variations WHERE product_id IN ($placeholders)");
+                                            $delVarStmt->execute($catIds);
+                                        }
+                                        
+                                        // Now delete from supplier_catalog by SKU and supplier_id
+                                        if ($sku !== '' && $supplier_id > 0) {
+                                            $delCatStmt = $db->prepare("DELETE FROM supplier_catalog WHERE sku = ? AND supplier_id = ?");
+                                            $delCatStmt->execute([$sku, $supplier_id]);
+                                        }
+                                        
+                                        // Also delete by source_inventory_id match (in case SKU doesn't match)
+                                        $delCatByInvStmt = $db->prepare("DELETE FROM supplier_catalog WHERE source_inventory_id = ?");
+                                        $delCatByInvStmt->execute([$item_id]);
+                                    }
+                                } catch (Exception $e) {
+                                    // Log but don't fail - supplier catalog deletion is secondary
+                                    error_log("Warning: Could not delete supplier_catalog for inventory ID {$item_id}: " . $e->getMessage());
+                                }
+
+                                // Finally delete the inventory item directly to avoid nested transactions
                                 $stmt = $db->prepare("DELETE FROM inventory WHERE id = ?");
                                 $deleted = $stmt->execute([$item_id]);
 
                                 if ($deleted) {
                                     $db->commit();
+                                    $cancelled_info = ((int)$order_counts['pending_orders'] > 0) ? " (auto-cancelled {$order_counts['pending_orders']} pending order(s))" : "";
                                     $deletedName = isset($existing_item['name']) ? $existing_item['name'] : $item_name;
-                                    $admin_orders_info = $admin_orders_count > 0 ? " ({$admin_orders_count} order(s) in admin/orders.php remain intact)" : "";
-                                    $force_info = (!empty($forceDelete) && $forceDelete && $sales_count > 0) ? " (also removed sales history)" : "";
-                                    $message = "Inventory item '{$deletedName}' was deleted successfully.{$force_info}{$admin_orders_info}";
+                                    $force_info = (!empty($forceDelete) && $forceDelete) ? " (also removed related orders and sales history)" : "";
+                                    $message = "Inventory item '{$deletedName}' was deleted successfully{$cancelled_info}{$force_info}.";
                                     $messageType = "success";
                                     try {
-                                        $log = $db->prepare("INSERT INTO sync_events (event_type, source_system, target_system, order_id, delivery_id, status_before, status_after, success, message) VALUES (?,?,?,?,?,?,?,?,?)");
-                                        $log->execute(['inventory_crud_sync','admin_ui','pos_clients',null,null,'existing','deleted',1,'Inventory item deleted: ' . $deletedName . ' (ID: ' . $item_id . ') - admin_orders remain intact']);
+                                        $log = $db->prepare("INSERT INTO sync_events (event_type, source_system, target_system, order_id, delivery_id, status_before, status_after, success, message) VALUES (?,?,?,?,?,?,?,?,?,?)");
+                                        $log->execute(['inventory_crud_sync','admin_ui','pos_clients',null,null,'existing','deleted',1,'Inventory item deleted: ' . $deletedName . ' (ID: ' . $item_id . ')']);
                                     } catch (Throwable $e) { }
                                 } else {
                                     $db->rollBack();
                                     $message = "Unable to delete inventory item. The item may have associated records or there was a database error.";
                                     $messageType = "danger";
                                     try {
-                                        $log = $db->prepare("INSERT INTO sync_events (event_type, source_system, target_system, order_id, delivery_id, status_before, status_after, success, message) VALUES (?,?,?,?,?,?,?,?,?)");
+                                        $log = $db->prepare("INSERT INTO sync_events (event_type, source_system, target_system, order_id, delivery_id, status_before, status_after, success, message) VALUES (?,?,?,?,?,?,?,?,?,?)");
                                         $log->execute(['inventory_crud_sync','admin_ui','pos_clients',null,null,'existing','deleted',0,'Delete failed for item ID ' . $item_id]);
                                     } catch (Throwable $e) { }
                                 }
@@ -520,17 +900,61 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     $message = "Deletion could not be completed fully due to related records. Item '{$deletedName}' has been archived instead.";
                                     $messageType = "warning";
                                     try {
-                                        $log = $db->prepare("INSERT INTO sync_events (event_type, source_system, target_system, order_id, delivery_id, status_before, status_after, success, message) VALUES (?,?,?,?,?,?,?,?,?)");
+                                        $log = $db->prepare("INSERT INTO sync_events (event_type, source_system, target_system, order_id, delivery_id, status_before, status_after, success, message) VALUES (?,?,?,?,?,?,?,?,?,?)");
                                         $log->execute(['inventory_soft_delete','admin_ui','pos_clients',null,null,'existing','archived',1,'Inventory item archived: ' . $deletedName . ' (ID: ' . $item_id . ')']);
                                     } catch (Throwable $e) { }
                                 } catch (Exception $ef) {
                                     $message = "Deletion failed due to an unexpected error.";
                                     $messageType = "danger";
                                     try {
-                                        $log = $db->prepare("INSERT INTO sync_events (event_type, source_system, target_system, order_id, delivery_id, status_before, status_after, success, message) VALUES (?,?,?,?,?,?,?,?,?)");
+                                        $log = $db->prepare("INSERT INTO sync_events (event_type, source_system, target_system, order_id, delivery_id, status_before, status_after, success, message) VALUES (?,?,?,?,?,?,?,?,?,?)");
                                         $log->execute(['inventory_crud_sync','admin_ui','pos_clients',null,null,'existing','deleted',0,'Delete exception for item ID ' . $item_id . ': ' . $e->getMessage()]);
                                     } catch (Throwable $ie) { }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+            // Edit admin order (status and customer assignment)
+            elseif ($_POST['action'] === 'edit_order') {
+                $isAjax = isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
+                if ($isAjax) { header('Content-Type: application/json'); }
+                $csrfToken = $_POST['csrf_token'] ?? '';
+                if (!isset($_SESSION['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $csrfToken)) {
+                    if ($isAjax) { echo json_encode(['success' => false, 'message' => 'Security check failed.']); exit; }
+                    else { $message = 'Security check failed.'; $messageType = 'danger'; }
+                } else {
+                    $oid = (int)($_POST['id'] ?? 0);
+                    $status = isset($_POST['confirmation_status']) ? trim((string)$_POST['confirmation_status']) : '';
+                    $userId = isset($_POST['user_id']) ? (int)$_POST['user_id'] : 0;
+                    if ($oid <= 0) { if ($isAjax) { echo json_encode(['success' => false, 'message' => 'Invalid order ID']); exit; } else { $message = 'Invalid order ID.'; $messageType = 'danger'; } }
+                    else {
+                        $allowed = ['pending','confirmed','delivered','completed','cancelled'];
+                        $setClauses = [];
+                        $params = [ ':id' => $oid ];
+                        if ($status !== '' && in_array($status, $allowed, true)) {
+                            $setClauses[] = 'confirmation_status = :st';
+                            $params[':st'] = $status;
+                            $setClauses[] = 'confirmation_date = NOW()';
+                        }
+                        if ($userId > 0) {
+                            $setClauses[] = 'user_id = :uid';
+                            $params[':uid'] = $userId;
+                        }
+                        if (empty($setClauses)) {
+                            if ($isAjax) { echo json_encode(['success' => false, 'message' => 'No changes to apply']); exit; }
+                            else { $message = 'No changes to apply.'; $messageType = 'warning'; }
+                        } else {
+                            try {
+                                $sql = 'UPDATE admin_orders SET ' . implode(', ', $setClauses) . ' WHERE id = :id';
+                                $upd = $db->prepare($sql);
+                                $upd->execute($params);
+                                if ($isAjax) { echo json_encode(['success' => true]); exit; }
+                                else { $message = 'Order was updated successfully.'; $messageType = 'success'; }
+                            } catch (Throwable $e) {
+                                if ($isAjax) { echo json_encode(['success' => false, 'message' => 'Update failed']); exit; }
+                                else { $message = 'Unable to update order.'; $messageType = 'danger'; }
                             }
                         }
                     }
@@ -540,98 +964,57 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// ====== Helper functions for variation display ======
-// Format variation for display: "Brand:Adidas|Size:Large|Color:Red" -> "Adidas - Large - Red" (combine values with dashes)
-function formatVariationForDisplay($variation) {
-    if (empty($variation)) return '';
-    if (strpos($variation, '|') === false && strpos($variation, ':') === false) return $variation;
-    
-    $parts = explode('|', $variation);
-    $values = [];
-    foreach ($parts as $part) {
-        $av = explode(':', trim($part), 2);
-        if (count($av) === 2) {
-            $values[] = trim($av[1]);
-        } else {
-            $values[] = trim($part);
-        }
-    }
-    return implode(' - ', $values);
-}
-
-// Format variation with labels: "Brand:Generic|Size:Large" -> "Brand: Generic | Size: Large"
-function formatVariationWithLabels($variation) {
-    if (empty($variation)) return '';
-    if (strpos($variation, '|') === false && strpos($variation, ':') === false) return $variation;
-    
-    $parts = explode('|', $variation);
-    $formatted = [];
-    foreach ($parts as $part) {
-        $av = explode(':', trim($part), 2);
-        if (count($av) === 2) {
-            $formatted[] = trim($av[0]) . ': ' . trim($av[1]);
-        } else {
-            $formatted[] = trim($part);
-        }
-    }
-    return implode(' | ', $formatted);
-}
-
-// Get all inventory items from completed orders only (not from supplier catalog)
-// NOTE: Inventory now only shows products from completed orders
-// Products from supplier/products.php are NOT synced to inventory
-// They only appear in supplier/supplier_details.php
-
-// IMPORTANT: Sync ALL completed orders to inventory table first
-// This ensures all completed orders are stored in the inventory database
-// The readAllFromCompletedOrders() method will also call sync, but we do it here explicitly
-// to ensure data is always up-to-date when the page loads
-try {
-    // Sync all completed orders from both admin_orders and orders tables
-    $inventory->syncAllCompletedOrdersToInventory();
-    
-} catch (Exception $e) {
-    error_log("Error syncing completed orders to inventory on page load: " . $e->getMessage());
-}
-
-// Query active items from completed orders - reads from inventory table (existing table)
-// This method also calls syncAllCompletedOrdersToInventory() internally for double safety
-$stmt = $inventory->readAllFromCompletedOrders();
-
-// Get fresh statement for iteration
-$stmt = $inventory->readAllFromCompletedOrders();
-// Compute ordered inventory IDs (non-cancelled orders) from both admin_orders and orders tables
-$orderedInventoryIds = [];
-try {
-    $hasAdminOrders = (bool)$db->query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'admin_orders'")->fetchColumn();
-    $hasOrders = (bool)$db->query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'orders'")->fetchColumn();
-    
-    $queries = [];
-    if ($hasAdminOrders) {
-        $queries[] = "SELECT DISTINCT inventory_id FROM admin_orders WHERE confirmation_status <> 'cancelled' AND inventory_id IS NOT NULL";
-    }
-    if ($hasOrders) {
-        $queries[] = "SELECT DISTINCT inventory_id FROM orders WHERE confirmation_status <> 'cancelled' AND inventory_id IS NOT NULL";
-    }
-    
-    if (count($queries) > 0) {
-        $query = count($queries) > 1 ? "(" . implode(") UNION DISTINCT (", $queries) . ")" : $queries[0];
-        $orderedStmt = $db->query($query);
-        while ($or = $orderedStmt->fetch(PDO::FETCH_ASSOC)) { 
-            $orderedInventoryIds[] = (int)$or['inventory_id']; 
-        }
-    }
-} catch (Exception $e) {
-    // Fallback to orders table only
+// Get all inventory items including those from completed deliveries
+// Check if viewing archived items
+$view_archived = isset($_GET['view']) && $_GET['view'] === 'archived';
+if ($view_archived) {
+    // Query archived items (is_deleted = 1)
+    $hasDeleted = false;
     try {
-        $orderedStmt = $db->query("SELECT DISTINCT inventory_id FROM orders WHERE confirmation_status <> 'cancelled' AND inventory_id IS NOT NULL");
-        while ($or = $orderedStmt->fetch(PDO::FETCH_ASSOC)) { 
-            $orderedInventoryIds[] = (int)$or['inventory_id']; 
-        }
-    } catch (Exception $e2) {
-        // Ignore if tables don't exist
+        $chk = $db->query("SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'inventory' AND column_name = 'is_deleted'");
+        $hasDeleted = (bool)$chk->fetchColumn();
+    } catch (Exception $e) { $hasDeleted = false; }
+    
+    if ($hasDeleted) {
+        $query = "SELECT i.*, s.name as supplier_name
+                  FROM inventory i 
+                  LEFT JOIN suppliers s ON i.supplier_id = s.id 
+                  WHERE COALESCE(i.is_deleted, 0) = 1 
+                  ORDER BY i.last_updated DESC, i.name";
+        $stmt = $db->prepare($query);
+        $stmt->execute();
+    } else {
+        // If is_deleted column doesn't exist, show empty result
+        $query = "SELECT i.*, s.name as supplier_name
+                  FROM inventory i 
+                  LEFT JOIN suppliers s ON i.supplier_id = s.id 
+                  WHERE 1 = 0";
+        $stmt = $db->prepare($query);
+        $stmt->execute();
+    }
+} else {
+    // Show only items that appear in admin_orders, orders, or sales_transactions
+    try {
+        $query = "SELECT i.*, s.name as supplier_name
+                  FROM inventory i
+                  LEFT JOIN suppliers s ON i.supplier_id = s.id
+                  WHERE COALESCE(i.is_deleted, 0) = 0
+                    AND (
+                        EXISTS (SELECT 1 FROM admin_orders ao WHERE ao.inventory_id = i.id)
+                        OR EXISTS (SELECT 1 FROM orders o WHERE o.inventory_id = i.id)
+                        OR EXISTS (SELECT 1 FROM sales_transactions st WHERE st.inventory_id = i.id)
+                    )
+                  ORDER BY i.last_updated DESC, i.name";
+        $stmt = $db->prepare($query);
+        $stmt->execute();
+    } catch (Throwable $e) {
+        $stmt = $db->prepare("SELECT 1 WHERE 0=1");
+        $stmt->execute();
+        $message = 'Failed to load inventory records.';
+        $messageType = 'danger';
     }
 }
+// Orders-related helpers removed
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -680,6 +1063,17 @@ try {
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 pt-2">
                 <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-1 pb-2 mb-3 border-bottom">
                     <h1 class="h2">Inventory Management</h1>
+                    <div class="btn-toolbar mb-2 mb-md-0">
+                        <?php 
+                        $view_archived = isset($_GET['view']) && $_GET['view'] === 'archived';
+                        ?>
+                        <a href="?view=<?php echo $view_archived ? 'active' : 'archived'; ?>" 
+                           class="btn btn-<?php echo $view_archived ? 'secondary' : 'outline-secondary'; ?>">
+                            <i class="bi bi-<?php echo $view_archived ? 'arrow-left' : 'archive'; ?> me-1"></i>
+                            <?php echo $view_archived ? 'Back to Active' : 'View Archived'; ?>
+                        </a>
+                        
+                    </div>
                 </div>
                 
                 <?php if (!empty($message)): ?>
@@ -693,7 +1087,12 @@ try {
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <div>
                             <i class="bi bi-table me-1"></i>
-                            Inventory Items
+                            <?php echo $view_archived ? 'Archived Inventory Items' : 'All Products'; ?>
+                            <?php if ($view_archived): ?>
+                                <span class="badge bg-warning ms-2">Archived</span>
+                            <?php endif; ?>
+                        </div>
+                        <div>
                         </div>
                     </div>
                     <div class="card-body">
@@ -704,129 +1103,150 @@ try {
                                         <th>SKU</th>
                                         <th>Name</th>
                                         <th>Category</th>
+                                        <th>Available</th>
+                                        
                                         <th>Reorder Threshold</th>
+                                        
                                         <th>Unit Type</th>
                                         <th>Variations</th>
-                                        <th>Stocks</th>
                                         <th>Supplier</th>
                                         <th>Location</th>
-                                        <th>Source</th>
                                         <th>Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody>
+                                    
                                     <?php while ($row = $stmt->fetch(PDO::FETCH_ASSOC)): ?>
                                         <?php
-                                        // Use inventory_id from the new table to get variations
-                                        $inventory_id = isset($row['inventory_id']) ? (int)$row['inventory_id'] : (int)$row['id'];
-                                        $__vars_row = $invVariation->getByInventory($inventory_id);
+                                        $__vars_row = $invVariation->getByInventory($row['id']);
                                         $__names_row = [];
                                         $__price_map = [];
                                         foreach ($__vars_row as $__vr) { 
                                             $__names_row[] = $__vr['variation']; 
                                             $__price_map[$__vr['variation']] = isset($__vr['unit_price']) ? (float)$__vr['unit_price'] : null;
                                         }
-                                        $__display_row = !empty($__names_row) ? implode(', ', array_slice($__names_row, 0, 6)) : '';
-                                        $__unit_type_row = (!empty($__vars_row) && isset($__vars_row[0]['unit_type'])) ? $__vars_row[0]['unit_type'] : ($row['unit_type'] ?? 'Per Piece');
-                                        $__price_map_json = htmlspecialchars(json_encode($__price_map), ENT_QUOTES);
-                                        // Stocks map aligned with unit type (lower-case for lookup)
-                                        $__stock_map = [];
-                                        try { $__stock_map = $invVariation->getStocksMap($inventory_id, strtolower($__unit_type_row ?: 'per piece')); } catch (Throwable $e) { $__stock_map = []; }
-                                        $__stock_map_json = htmlspecialchars(json_encode($__stock_map), ENT_QUOTES);
-                                        
-                                        // Get all completed orders for this inventory item (one entry per order)
-                                        // CRITICAL: Only fetch from admin_orders table (admin/orders.php)
-                                        // Do NOT fetch from orders table or any other source
-                                        $__completed_orders_map = [];
-                                        try {
-                                            // Get ONLY completed orders from admin_orders table
-                                            $ordersStmt = $db->prepare("SELECT id, variation, quantity, unit_type, order_date
-                                                                      FROM admin_orders 
-                                                                      WHERE inventory_id = ? 
-                                                                      AND confirmation_status = 'completed' 
-                                                                      ORDER BY order_date DESC");
-                                            $ordersStmt->execute([$inventory_id]);
-                                            while ($orderRow = $ordersStmt->fetch(PDO::FETCH_ASSOC)) {
-                                                $orderId = 'admin_' . (int)$orderRow['id'];
-                                                // Add ALL orders - each order ID is unique
-                                                $__completed_orders_map[$orderId] = [
-                                                    'id' => (int)$orderRow['id'],
-                                                    'variation' => $orderRow['variation'] ?? '',
-                                                    'quantity' => (int)$orderRow['quantity'],
-                                                    'unit_type' => $orderRow['unit_type'] ?? 'per piece',
-                                                    'order_date' => $orderRow['order_date'] ?? null
-                                                ];
+                                            $__display_row = !empty($__names_row) ? implode(', ', array_slice($__names_row, 0, 6)) : '';
+                                            $__unit_type_row = (!empty($__vars_row) && isset($__vars_row[0]['unit_type'])) ? $__vars_row[0]['unit_type'] : 'Per Piece';
+                                            $__price_map_json = htmlspecialchars(json_encode($__price_map), ENT_QUOTES);
+                                            // Available stocks map using Admin POS logic:
+                                            // stock = (SUM completed admin_orders) - (SUM sales_transactions)
+                                            $__stock_map = [];
+                                            $__available_total = 0;
+                                            try {
+                                                $item_id = (int)$row['id'];
+                                                $item_name_key = strtolower(trim($row['name'] ?? ''));
+                                                $sameNameIds = [];
+                                                if (!empty($item_name_key)) {
+                                                    $nameStmt = $db->prepare("SELECT DISTINCT id FROM inventory WHERE LOWER(TRIM(COALESCE(name,''))) = :name AND COALESCE(is_deleted,0) = 0");
+                                                    $nameStmt->execute([':name' => $item_name_key]);
+                                                    while ($nm = $nameStmt->fetch(PDO::FETCH_ASSOC)) { $sameNameIds[] = (int)$nm['id']; }
+                                                }
+                                                if (empty($sameNameIds)) { $sameNameIds = [$item_id]; }
+                                                // Completed orders check
+                                                $ordChk = $db->prepare("SELECT COUNT(*) as cnt FROM admin_orders WHERE inventory_id IN (" . implode(',', array_fill(0, count($sameNameIds), '?')) . ") AND confirmation_status = 'completed'");
+                                                $ordChk->execute($sameNameIds);
+                                                $hasCompleted = ((int)$ordChk->fetch(PDO::FETCH_ASSOC)['cnt'] ?? 0) > 0;
+                                                // Variations list source: admin_orders if completed exists, else inventory_variations
+                                                $vars = [];
+                                                if ($hasCompleted) {
+                                                    $ph = implode(',', array_fill(0, count($sameNameIds), '?'));
+                                                    $vstmt = $db->prepare("SELECT variation, unit_type, unit_price, SUM(quantity) as total_ordered_qty FROM admin_orders WHERE inventory_id IN ($ph) AND confirmation_status='completed' AND variation IS NOT NULL AND variation!='' AND LOWER(TRIM(variation))!='null' GROUP BY variation");
+                                                    $vstmt->execute($sameNameIds);
+                                                    $vars = $vstmt->fetchAll(PDO::FETCH_ASSOC);
+                                                } else {
+                                                    $ph = implode(',', array_fill(0, count($sameNameIds), '?'));
+                                                    $vstmt = $db->prepare("SELECT variation, unit_type, unit_price, quantity as total_ordered_qty FROM inventory_variations WHERE inventory_id IN ($ph) AND variation IS NOT NULL AND variation!='' AND LOWER(TRIM(variation))!='null' AND quantity>0");
+                                                    $vstmt->execute($sameNameIds);
+                                                    $vars = $vstmt->fetchAll(PDO::FETCH_ASSOC);
+                                                }
+                                                foreach ($vars as $orderVar) {
+                                                    $varKey = trim((string)($orderVar['variation'] ?? ''));
+                                                    if ($varKey === '' || strtolower($varKey) === 'null') continue;
+                                                    $orderedQty = (int)($orderVar['total_ordered_qty'] ?? 0);
+                                                    $soldPh = implode(',', array_fill(0, count($sameNameIds), '?'));
+                                                    $soldStmt = $db->prepare("SELECT SUM(quantity) as total_sold FROM sales_transactions WHERE inventory_id IN ($soldPh) AND variation = ? AND (variation IS NOT NULL AND variation!='' AND variation!='null')");
+                                                    $soldParams = array_merge($sameNameIds, [$varKey]);
+                                                    $soldStmt->execute($soldParams);
+                                                    $soldRow = $soldStmt->fetch(PDO::FETCH_ASSOC);
+                                                    $soldQty = (int)($soldRow['total_sold'] ?? 0);
+                                                    $varStock = max(0, $orderedQty - $soldQty);
+                                                    $__stock_map[$varKey] = (isset($__stock_map[$varKey]) ? $__stock_map[$varKey] : 0) + $varStock;
+                                                }
+                                                // Base stock if no variations
+                                                if (empty($__stock_map)) {
+                                                    if ($hasCompleted) {
+                                                        $basePh = implode(',', array_fill(0, count($sameNameIds), '?'));
+                                                        $baseQtyStmt = $db->prepare("SELECT SUM(quantity) as total_qty FROM admin_orders WHERE inventory_id IN ($basePh) AND confirmation_status='completed' AND (variation IS NULL OR variation='' OR variation='null' OR LOWER(TRIM(variation))='null')");
+                                                        $baseQtyStmt->execute($sameNameIds);
+                                                        $orderedBaseQty = (int)($baseQtyStmt->fetch(PDO::FETCH_ASSOC)['total_qty'] ?? 0);
+                                                    } else {
+                                                        $basePh = implode(',', array_fill(0, count($sameNameIds), '?'));
+                                                        $baseQtyStmt = $db->prepare("SELECT SUM(quantity) as total_qty FROM inventory_variations WHERE inventory_id IN ($basePh) AND (variation IS NULL OR variation='' OR variation='null' OR LOWER(TRIM(variation))='null') AND quantity>0");
+                                                        $baseQtyStmt->execute($sameNameIds);
+                                                        $orderedBaseQty = (int)($baseQtyStmt->fetch(PDO::FETCH_ASSOC)['total_qty'] ?? 0);
+                                                    }
+                                                    $soldBasePh = implode(',', array_fill(0, count($sameNameIds), '?'));
+                                                    $soldBaseStmt = $db->prepare("SELECT SUM(quantity) as total_sold FROM sales_transactions WHERE inventory_id IN ($soldBasePh) AND (variation IS NULL OR variation='' OR variation='null' OR LOWER(TRIM(variation))='null')");
+                                                    $soldBaseStmt->execute($sameNameIds);
+                                                    $soldBaseQty = (int)($soldBaseStmt->fetch(PDO::FETCH_ASSOC)['total_sold'] ?? 0);
+                                                    $baseStock = max(0, $orderedBaseQty - $soldBaseQty);
+                                                    $__available_total = $baseStock;
+                                                } else {
+                                                    foreach ($__stock_map as $__sv) { $__available_total += (int)$__sv; }
+                                                }
+                                            } catch (Throwable $e) {
+                                                $__stock_map = [];
+                                                $__available_total = 0;
                                             }
-                                            
-                                            // DO NOT fetch from orders table - we only want data from admin/orders.php
-                                            
-                                            // Convert map to array
-                                            $__completed_orders = array_values($__completed_orders_map);
-                                        } catch (Exception $e) {
-                                            error_log("Error getting completed orders from admin_orders: " . $e->getMessage());
-                                            $__completed_orders = [];
-                                        }
+                                            $__stock_map_json = htmlspecialchars(json_encode($__stock_map), ENT_QUOTES);
                                         ?>
-                                        <tr>
-                                            <td><?php echo htmlspecialchars($row['sku'] ?? ''); ?></td>
-                                            <td><?php echo htmlspecialchars($row['name'] ?? ''); ?></td>
-                                            <td><?php echo htmlspecialchars($row['category'] ?? ''); ?></td>
-                                            <td><?php echo htmlspecialchars($row['reorder_threshold'] ?? 0); ?></td>
+                                        <tr class="<?php echo $view_archived ? 'table-secondary' : ''; ?>">
+                                            <td><?php echo $row['sku']; ?></td>
+                                            <td><?php echo $row['name']; ?></td>
+                                            <td><?php echo $row['category']; ?></td>
+                                        
+                                            <td>
+                                                <?php 
+                                                    $avail = (int)$__available_total; 
+                                                    $reorder = (int)$row['reorder_threshold'];
+                                                    $badgeClass = $avail <= 0 ? 'bg-danger' : ($avail <= $reorder ? 'bg-warning' : 'bg-success');
+                                                    $badgeText = $avail <= 0 ? 'Out of stock' : ($avail <= $reorder ? ('Low: '.$avail.' left') : ($avail.' in stock'));
+                                                ?>
+                                                <span class="badge <?php echo $badgeClass; ?>" data-order="<?php echo $avail; ?>"><?php echo $badgeText; ?></span>
+                                            </td>
+                                            <td><?php echo $row['reorder_threshold']; ?></td>
                                             <td><span class="badge bg-secondary"><?php echo htmlspecialchars($__unit_type_row); ?></span></td>
                                             <td>
-                                                <?php if (!empty($__completed_orders)) { ?>
-                                                    <?php foreach ($__completed_orders as $order) { 
-                                                        $ordered_variation = isset($order['variation']) ? trim($order['variation']) : '';
-                                                    ?>
-                                                        <div class="mb-3">
-                                                            <?php if (!empty($ordered_variation)): ?>
-                                                                <div class="d-flex flex-column">
-                                                                    <span class="badge bg-info mb-1 fs-6">
-                                                                        <i class="bi bi-tag-fill me-1"></i><?= htmlspecialchars(formatVariationForDisplay($ordered_variation)) ?>
-                                                                    </span>
-                                                                    <small class="text-muted"><?= htmlspecialchars(formatVariationWithLabels($ordered_variation)) ?></small>
-                                                                </div>
-                                                            <?php else: ?>
-                                                                <span class="badge bg-secondary">No Variation</span>
-                                                            <?php endif; ?>
-                                                        </div>
-                                                    <?php } ?>
-                                                <?php } else { echo '<span class="text-muted">—</span>'; } ?>
+                                                <?php if (!empty($__vars_row)) { ?>
+                                                    <select class="form-select form-select-sm variation-select" aria-label="Select variation">
+                                                        <?php foreach ($__vars_row as $__vr) { 
+                                                            $vName = $__vr['variation'];
+                                                            $vPrice = isset($__price_map[$vName]) ? $__price_map[$vName] : 0;
+                                                            $vStock = isset($__stock_map[$vName]) ? $__stock_map[$vName] : 0;
+                                                            $lowClass = ($vStock <= (int)$row['reorder_threshold']) ? ' text-warning' : '';
+                                                            $stockClass = $vStock > 0 ? 'text-success fw-bold' : 'text-danger';
+                                                        ?>
+                                                            <option value="<?php echo htmlspecialchars($vName); ?>" data-price="<?php echo htmlspecialchars($vPrice); ?>" data-stock="<?php echo htmlspecialchars($vStock); ?>" class="<?php echo $lowClass; ?> <?php echo $stockClass; ?>">
+                                                                <?php echo htmlspecialchars($vName); ?> — ₱<?php echo number_format((float)$vPrice, 2); ?>
+                                                            </option>
+                                                        <?php } ?>
+                                                    </select>
+                                                <?php } else { echo '—'; } ?>
                                             </td>
-                                            <td>
-                                                <?php if (!empty($__completed_orders)) { ?>
-                                                    <?php foreach ($__completed_orders as $order) { 
-                                                        $order_qty = (int)($order['quantity'] ?? 0);
-                                                    ?>
-                                                        <div class="mb-3">
-                                                            <div class="d-flex flex-column align-items-start">
-                                                                <span class="badge bg-primary fs-6 mb-1">
-                                                                    <i class="bi bi-box-seam me-1"></i><strong><?= $order_qty ?></strong> pcs
-                                                                </span>
-                                                                <small class="text-muted">Quantity Ordered</small>
-                                                            </div>
-                                                        </div>
-                                                    <?php } ?>
-                                                <?php } else { echo '<span class="text-muted">—</span>'; } ?>
-                                            </td>
-                                            <td><?php echo htmlspecialchars($row['supplier_name'] ?? ''); ?></td>
-                                            <td><?php echo htmlspecialchars($row['location'] ?? ''); ?></td>
-                                            <td>
-                                                <span class="badge <?php echo ($row['source_type'] === 'Admin Created') ? 'bg-primary' : 'bg-success'; ?>">
-                                                    <?php echo htmlspecialchars($row['source_type'] ?? 'From Completed Order'); ?>
-                                                </span>
-                                            </td>
+                                            <td><?php echo $row['supplier_name']; ?></td>
+                                            <td><?php echo $row['location']; ?></td>
+                                            
                                             <td>
                                                 <button type="button" class="btn btn-sm btn-info view-btn" 
                                                     data-id="<?php echo $row['id']; ?>"
-                                                    data-sku="<?php echo htmlspecialchars($row['sku'] ?? ''); ?>"
-                                                    data-name="<?php echo htmlspecialchars($row['name'] ?? ''); ?>"
-                                                    data-description="<?php echo htmlspecialchars($row['description'] ?? ''); ?>"
-                                                    data-reorder="<?php echo $row['reorder_threshold'] ?? 0; ?>"
-                                                    data-supplier="<?php echo $row['supplier_id'] ?? ''; ?>"
-                                                    data-category="<?php echo htmlspecialchars($row['category'] ?? ''); ?>"
-                                                    data-location="<?php echo htmlspecialchars($row['location'] ?? ''); ?>"
-                                                    data-source="<?php echo htmlspecialchars($row['source_type'] ?? 'From Completed Order'); ?>"
+                                                    data-sku="<?php echo $row['sku']; ?>"
+                                                    data-name="<?php echo $row['name']; ?>"
+                                                    data-description="<?php echo $row['description']; ?>"
+                                                    data-reorder="<?php echo $row['reorder_threshold']; ?>"
+                                                    data-supplier="<?php echo $row['supplier_id']; ?>"
+                                                    data-category="<?php echo $row['category']; ?>"
+                                                    data-location="<?php echo $row['location']; ?>"
+                                                     
                                                     data-variations="<?php echo htmlspecialchars($__display_row); ?>"
                                                     data-unit_type="<?php echo htmlspecialchars($__unit_type_row); ?>"
                                                     data-variation_prices="<?php echo $__price_map_json; ?>"
@@ -834,16 +1254,24 @@ try {
                                                     data-bs-toggle="modal" data-bs-target="#viewInventoryModal">
                                                     <i class="bi bi-eye"></i>
                                                 </button>
+                                                <?php if ($view_archived): ?>
+                                                    <button type="button" class="btn btn-sm btn-success restore-btn"
+                                                        data-id="<?php echo $row['id']; ?>"
+                                                        data-name="<?php echo htmlspecialchars($row['name']); ?>"
+                                                        title="Restore Item">
+                                                        <i class="bi bi-arrow-counterclockwise"></i> Restore
+                                                    </button>
+                                                <?php else: ?>
                                                 <button type="button" class="btn btn-sm btn-primary edit-btn" 
                                                     data-id="<?php echo $row['id']; ?>"
-                                                    data-sku="<?php echo htmlspecialchars($row['sku'] ?? ''); ?>"
-                                                    data-name="<?php echo htmlspecialchars($row['name'] ?? ''); ?>"
-                                                    data-description="<?php echo htmlspecialchars($row['description'] ?? ''); ?>"
-                                                    data-reorder="<?php echo $row['reorder_threshold'] ?? 0; ?>"
-                                                    data-supplier="<?php echo $row['supplier_id'] ?? ''; ?>"
-                                                    data-category="<?php echo htmlspecialchars($row['category'] ?? ''); ?>"
-                                                    data-location="<?php echo htmlspecialchars($row['location'] ?? ''); ?>"
-                                                    data-source="<?php echo htmlspecialchars($row['source_type'] ?? 'From Completed Order'); ?>"
+                                                    data-sku="<?php echo $row['sku']; ?>"
+                                                    data-name="<?php echo $row['name']; ?>"
+                                                    data-description="<?php echo $row['description']; ?>"
+                                                    data-reorder="<?php echo $row['reorder_threshold']; ?>"
+                                                    data-supplier="<?php echo $row['supplier_id']; ?>"
+                                                    data-category="<?php echo $row['category']; ?>"
+                                                    data-location="<?php echo $row['location']; ?>"
+                                                     
                                                     data-variations="<?php echo htmlspecialchars($__display_row); ?>"
                                                     data-unit_type="<?php echo htmlspecialchars($__unit_type_row); ?>"
                                                     data-variation_prices="<?php echo $__price_map_json; ?>"
@@ -851,20 +1279,31 @@ try {
                                                     data-bs-toggle="modal" data-bs-target="#editInventoryModal">
                                                     <i class="bi bi-pencil"></i>
                                                 </button>
-                                                <button type="button" class="btn btn-sm btn-danger delete-btn" 
-                                                    data-id="<?php echo $row['id']; ?>"
-                                                    data-name="<?php echo htmlspecialchars(!empty($row['name']) ? $row['name'] : ($row['sku'] ?? 'Item #' . $row['id'])); ?>"
-                                                    data-bs-toggle="modal" data-bs-target="#deleteInventoryModal">
-                                                    <i class="bi bi-trash"></i>
-                                                </button>
+                                                <?php endif; ?>
                                             </td>
                                         </tr>
                                     <?php endwhile; ?>
                                 </tbody>
                             </table>
                         </div>
+                        <?php if (empty($view_archived)): ?>
+                        <nav>
+                            <ul class="pagination pagination-sm mb-0">
+                                <?php $prev = max(1, ($page ?? 1) - 1); $next = min(($adminPages ?? 1), ($page ?? 1) + 1); ?>
+                                <li class="page-item <?php echo (($page ?? 1) <= 1) ? 'disabled' : ''; ?>">
+                                    <a class="page-link" href="?page=<?php echo $prev; ?>">Prev</a>
+                                </li>
+                                <li class="page-item disabled"><span class="page-link">Page <?php echo ($page ?? 1); ?> of <?php echo ($adminPages ?? 1); ?></span></li>
+                                <li class="page-item <?php echo (($page ?? 1) >= ($adminPages ?? 1)) ? 'disabled' : ''; ?>">
+                                    <a class="page-link" href="?page=<?php echo $next; ?>">Next</a>
+                                </li>
+                            </ul>
+                        </nav>
+                        <?php endif; ?>
                     </div>
                 </div>
+
+
             </main>
         </div>
     </div>
@@ -934,7 +1373,7 @@ try {
         <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title" id="editInventoryModalLabel">Edit Inventory Item</h5>
+                    <h5 class="modal-title" id="editInventoryModalLabel">Edit Product</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <form method="POST" id="editInventoryForm">
@@ -942,22 +1381,95 @@ try {
                         <input type="hidden" name="action" value="update">
                         <input type="hidden" name="id" id="edit-id">
                         <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['csrf_token']); ?>">
+                        <div class="row g-3">
+                            <div class="col-md-6 mb-3">
+                                <label for="edit-sku" class="form-label">SKU</label>
+                                <input type="text" class="form-control" id="edit-sku" name="sku" required>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label for="edit-name" class="form-label">Product Name</label>
+                                <input type="text" class="form-control" id="edit-name" name="name" required>
+                            </div>
+                        </div>
                         
-                        <div class="alert alert-info">
-                            <i class="bi bi-info-circle me-2"></i>
-                            You can only edit the reorder threshold. Other fields are preserved to maintain product integrity and avoid duplication.
+                        <div class="row g-3">
+                            <div class="col-md-6 mb-3">
+                                <label for="edit-category" class="form-label">Category</label>
+                                <select class="form-select" id="edit-category" name="category" required>
+                                    <option value="">Select Category</option>
+                                    <option value="Construction">Construction</option>
+                                    <option value="Tools">Tools</option>
+                                    <option value="Electrical">Electrical</option>
+                                    <option value="Plumbing">Plumbing</option>
+                                    <option value="Paints">Paints</option>
+                                    <option value="Hardware">Hardware</option>
+                                    <option value="Fasteners">Fasteners</option>
+                                    <option value="Garden">Garden</option>
+                                    <option value="Fixtures">Fixtures</option>
+                                    <option value="Household">Household</option>
+                                </select>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label class="form-label">Variation Prices & Stock</label>
+                                <div class="alert alert-info p-2 mb-2">
+                                    Price and stock are calculated from orders and sales.
+                                </div>
+                                <div id="editVariationPriceContainer" class="row g-2"></div>
+                                <small class="text-muted">Price and stock information is read-only.</small>
+                            </div>
+                        </div>
+
+                        <!-- Unit Type selection (read-only) -->
+                        <div class="row g-3">
+                            <div class="col-md-12 mb-3">
+                                <label class="form-label mb-0">Unit Type</label>
+                                <div id="editUnitTypeRadios" class="row g-2"></div>
+                                <div class="d-flex align-items-center mt-2">
+                                    <small class="text-muted me-2">Unit type information is read-only.</small>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Dynamic variation attributes per unit type (read-only) -->
+                        <label class="form-label mb-0">Variation Attributes</label>
+                        <div id="editUnitVariationContainer" class="border rounded p-2 mb-3"></div>
+                        <small class="text-muted">Variation attributes are read-only.</small>
+
+                        <div class="row g-3">
+                            <div class="col-md-4 mb-3">
+                                <label for="edit-reorder_threshold" class="form-label">Reorder Threshold *</label>
+                                <input type="number" class="form-control" id="edit-reorder_threshold" name="reorder_threshold" min="0" required>
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label for="edit-location" class="form-label">Location</label>
+                                <input type="text" class="form-control" id="edit-location" name="location" placeholder="e.g., Warehouse A, Shelf 1">
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label class="form-label">Variation</label>
+                                <div class="row g-2 align-items-center">
+                                    <div class="col-md-6">
+                                        <select id="edit-variation-select" class="form-select form-select-sm" aria-label="Select variation" disabled></select>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <span class="badge bg-light text-dark me-2">Price ₱<span id="edit-selected-price">0.00</span></span>
+                                        <span class="badge bg-light text-dark">Stock <span id="edit-selected-stock">0</span></span>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                         
                         <div class="mb-3">
-                            <label for="edit-reorder_threshold" class="form-label">Reorder Threshold *</label>
-                            <input type="number" class="form-control" id="edit-reorder_threshold" name="reorder_threshold" min="0" required>
-                            <small class="text-muted">Set the minimum stock level before a reorder alert is triggered.</small>
+                            <label for="edit-description" class="form-label">Description</label>
+                            <textarea class="form-control" id="edit-description" name="description" rows="3"></textarea>
                         </div>
+                        <input type="hidden" id="edit-quantity" name="quantity" value="0">
+                        <input type="hidden" id="edit-unit_price" name="unit_price" value="0">
+                        <div id="edit-variations-container" class="d-none"></div>
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                         <button type="submit" class="btn btn-primary">
-                            <i class="bi bi-check-lg me-1"></i>Update Reorder Threshold
+                            <i class="bi bi-check-lg me-1"></i>Save Changes
                         </button>
                     </div>
                 </form>
@@ -1133,42 +1645,42 @@ try {
         </div>
     </div>
 
-    <!-- Delete Inventory Modal -->
-    <div class="modal fade" id="deleteInventoryModal" tabindex="-1" aria-labelledby="deleteInventoryModalLabel" aria-hidden="true">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="deleteInventoryModalLabel">Delete Inventory Item</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <form method="POST" id="deleteInventoryForm">
-                    <div class="modal-body">
-                        <input type="hidden" name="action" value="delete">
-                        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['csrf_token']); ?>">
-                        <input type="hidden" name="id" id="delete-id">
-                        <input type="hidden" name="name" id="delete-name-input">
-                        <p>Are you sure you want to delete the item: <strong id="delete-item-name"></strong>?</p>
-                        <p class="text-danger">This action cannot be undone.</p>
-                        <div class="alert alert-warning">
-                            <i class="bi bi-exclamation-triangle me-2"></i>
-                            <strong>Warning:</strong> This will permanently remove the inventory item from the system.
-                        </div>
-                <div class="form-check mt-3">
-                    <input class="form-check-input" type="checkbox" value="1" id="force-delete" name="force_delete">
-                    <label class="form-check-label" for="force-delete">
-                        Force delete and remove related confirmed orders and sales history
-                    </label>
-                    <small class="text-muted d-block">Use only if you understand this will erase order and sales records linked to this item.</small>
-                </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                        <button type="submit" class="btn btn-danger">Delete</button>
-                    </div>
-                </form>
-            </div>
-        </div>
-    </div>
+    <!-- Delete Inventory Modal removed as per requirements -->
+    
+    <style>
+        /* Styling for read-only fields in edit modal */
+        #editInventoryModal input[readonly], 
+        #editInventoryModal select[disabled], 
+        #editInventoryModal textarea[readonly] {
+            background-color: #f8f9fa;
+            border-color: #dee2e6;
+            color: #6c757d;
+            cursor: not-allowed;
+        }
+        
+        #editInventoryModal input[type="radio"][disabled] {
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+        
+        #editInventoryModal .form-check-input[disabled] ~ .form-check-label {
+            color: #6c757d;
+            cursor: not-allowed;
+        }
+        
+        /* Ensure the reorder threshold field stands out as editable */
+        #edit-reorder_threshold {
+            background-color: #ffffff;
+            border-color: #86b7fe;
+            color: #212529;
+            cursor: auto;
+        }
+        
+        #edit-reorder_threshold:focus {
+            border-color: #86b7fe;
+            box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+        }
+    </style>
     
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
@@ -1406,6 +1918,10 @@ try {
                 input.name = 'unit_type_code';
                 input.id = (isEdit ? 'editUnitCode_' : 'unitCode_') + code;
                 input.value = code;
+                // Make radio buttons read-only in edit mode
+                if (isEdit) {
+                    input.disabled = true;
+                }
                 const label = document.createElement('label');
                 label.className = 'form-check-label';
                 label.setAttribute('for', input.id);
@@ -1417,20 +1933,24 @@ try {
             });
             container.appendChild(row);
             
-            // Bind change listeners for variation rendering
-            document.querySelectorAll(`#${containerId} input[type="radio"]`).forEach(r => {
-                r.addEventListener('change', async () => {
-                    if (!r.checked) return;
-                    const code = r.value;
-                    hydratedUnitCodes.delete(code); // Force refresh
-                    if (containerId === 'unitTypeRadios') {
-                        await hydrateUnitVariations(code, true);
-                        renderUnitVariations(code);
-                    }
+            // Bind change listeners for variation rendering (only for non-edit mode)
+            if (!isEdit) {
+                document.querySelectorAll(`#${containerId} input[type="radio"]`).forEach(r => {
+                    r.addEventListener('change', async () => {
+                        if (!r.checked) return;
+                        const code = r.value;
+                        hydratedUnitCodes.delete(code); // Force refresh
+                        if (containerId === 'unitTypeRadios') {
+                            await hydrateUnitVariations(code, true);
+                            renderUnitVariations(code);
+                        }
+                    });
                 });
-            });
+            }
         }
         
+        
+
         let unitManageModalInst = null;
         function setUnitManageMode(mode) {
             const add = document.getElementById('unitManageAddSection');
@@ -2508,22 +3028,32 @@ try {
         
         // Listen to unit type radio selection (for edit form only)
         document.addEventListener('DOMContentLoaded', function() {
-            // Edit form unit type management buttons
-            const btnEditAdd = document.getElementById('btnEditUnitTypeAdd');
-            const btnEditEdit = document.getElementById('btnEditUnitTypeEdit');
-            const btnEditDel = document.getElementById('btnEditUnitTypeDelete');
-            if (btnEditAdd) btnEditAdd.addEventListener('click', () => openUnitManageModal('add'));
-            if (btnEditEdit) btnEditEdit.addEventListener('click', () => openUnitManageModal('edit'));
-            if (btnEditDel) btnEditDel.addEventListener('click', () => openUnitManageModal('delete'));
-            
-            // Edit form variation management buttons
-            const btnEditVariationAdd = document.getElementById('btnEditVariationAdd');
-            const btnEditVariationEdit = document.getElementById('btnEditVariationEdit');
-            const btnEditVariationDelete = document.getElementById('btnEditVariationDelete');
-            if (btnEditVariationAdd) btnEditVariationAdd.addEventListener('click', () => openVariationManageModal('add'));
-            if (btnEditVariationEdit) btnEditVariationEdit.addEventListener('click', () => openVariationManageModal('edit'));
-            if (btnEditVariationDelete) btnEditVariationDelete.addEventListener('click', () => openVariationManageModal('delete'));
+            // Unit type and variation management buttons removed for edit form as per requirements
         });
+    </script>
+    <script>
+      (function(){
+        function refreshAlertBadge(){
+          $.ajax({
+            url: 'ajax/get_alert_counts.php',
+            method: 'GET',
+            dataType: 'json'
+          }).done(function(r){
+            var c = parseInt((r && (r.active_stock_alerts||r.total_alerts||0)) ,10) || 0;
+            var $b = $('#sidebarAlertBadge');
+            if(c>0){
+              if($b.length===0){
+                $('a[href="alerts.php"]').append('<span class="badge bg-danger ms-1" id="sidebarAlertBadge">'+c+'</span>');
+              } else {
+                $b.text(c).show();
+              }
+            } else if($b.length){
+              $b.hide();
+            }
+          });
+        }
+        setInterval(refreshAlertBadge,30000);
+      })();
     </script>
     <script>
         // Variation price helpers
@@ -2558,9 +3088,14 @@ try {
             // Improve accessibility for variation price inputs
             $('.variation-price').attr('inputmode','decimal').each(function(){ $(this).attr('aria-label', (($(this).data('variant')||'') + ' price')); });
             // Initialize DataTable
+            var columnDefs = [];
+            <?php if (!$view_archived): ?>
+            columnDefs.push({ orderable: false, targets: 0 }); // Disable sorting on checkbox column
+            <?php endif; ?>
             $('#inventoryTable').DataTable({
+                columnDefs: columnDefs,
                 responsive: true,
-                order: [[0, 'asc']]
+                order: [[<?php echo $view_archived ? '0' : '1'; ?>, 'asc']]
             });
             
             // View Item
@@ -2599,16 +3134,9 @@ try {
                 Object.keys(priceMap).forEach(function(name){
                     var price = parseFloat(priceMap[name] || 0);
                     var stock = parseInt((stockMap[name] || 0), 10);
-                    var lowStock = stock <= reorder;
-                    var stockClass = stock > 0 ? (lowStock ? 'bg-warning' : 'bg-success') : 'bg-danger';
-                    var lowClass = lowStock ? ' text-warning' : '';
-                    $sel.append('<option value="'+name.replace(/"/g,'&quot;')+'" data-price="'+price.toFixed(2)+'" data-stock="'+stock+'" class="'+lowClass+'">'+name+' — ₱'+price.toFixed(2)+' (Stock: '+stock+')</option>');
-                    listHtml += '<div class="d-flex justify-content-between align-items-center mb-2 p-2 border rounded">' +
-                                '<span class="fw-semibold">'+name+'</span>' +
-                                '<div class="d-flex align-items-center gap-2">' +
-                                '<span class="text-muted">₱'+price.toFixed(2)+'</span>' +
-                                '<span class="badge '+stockClass+' text-white">Stock: '+stock+'</span>' +
-                                '</div></div>';
+                    var lowClass = stock <= reorder ? ' text-warning' : '';
+                    $sel.append('<option value="'+name.replace(/"/g,'&quot;')+'" data-price="'+price.toFixed(2)+'" data-stock="'+stock+'" class="'+lowClass+'">'+name+' — ₱'+price.toFixed(2)+'</option>');
+                    listHtml += '<span class="badge bg-light text-dark me-1'+lowClass+'">'+name+' — ₱'+price.toFixed(2)+' — Qty '+stock+'</span>';
                 });
                 $('#view-variation-list').html(listHtml || '<span class="text-muted">No variations</span>');
                 // Set selected info
@@ -2626,67 +3154,179 @@ try {
             
             // Edit Item
             $('.edit-btn').off('click').on('click', function() {
-                // Only populate reorder threshold - other fields are preserved
                 $('#edit-id').val($(this).data('id'));
+                $('#edit-sku').val($(this).data('sku'));
+                $('#edit-name').val($(this).data('name'));
+                $('#edit-description').val($(this).data('description'));
                 $('#edit-reorder_threshold').val($(this).data('reorder'));
+                $('#edit-category').val($(this).data('category'));
+                // Always disable supplier editing on edit modal
+                $('#edit-supplier_id')
+                    .val($(this).data('supplier'))
+                    .prop('disabled', true)
+                    .attr('title', 'Supplier cannot be changed on edit.')
+                    .trigger('change');
+                $('#edit-location').val($(this).data('location'));
+
+                // Also set unit type and variations like initial binding
+                var storedUnitType = $(this).data('unit_type');
+                var autoUnitType = unitUtils.getAutoUnitType($(this).data('name'), $(this).data('category'));
+                var selectedUnitType = (storedUnitType || autoUnitType || 'per piece').toLowerCase();
+                $('#edit-unit-type').val(selectedUnitType);
+                $('#edit-auto-unit-type-hint').text(autoUnitType);
+                // Build edit variation select options
+                var priceRaw = $(this).attr('data-variation_prices') || '';
+                var stockRaw = $(this).attr('data-variation_stocks') || '';
+                var priceMap = {}, stockMap = {};
+                if (priceRaw) { try { priceMap = JSON.parse(priceRaw.replace(/&quot;/g, '"')); } catch(e){} }
+                if (stockRaw) { try { stockMap = JSON.parse(stockRaw.replace(/&quot;/g, '"')); } catch(e){} }
+                var reorder = parseInt($(this).data('reorder'), 10) || 0;
+                var $sel = $('#edit-variation-select');
+                $sel.empty();
+                var listHtml = '';
+                
+                // Populate variation price/stock container with editable inputs
+                var $priceContainer = $('#editVariationPriceContainer');
+                $priceContainer.empty();
+                
+                // Get all variations (from either priceMap or stockMap)
+                var allVariations = new Set();
+                Object.keys(priceMap).forEach(function(k) { allVariations.add(k); });
+                Object.keys(stockMap).forEach(function(k) { allVariations.add(k); });
+                
+                allVariations.forEach(function(variationName) {
+                    var price = parseFloat(priceMap[variationName] || 0);
+                    var stock = parseInt((stockMap[variationName] || 0), 10);
+                    var lowClass = stock <= reorder ? ' text-warning' : '';
+                    
+                    // Add to dropdown
+                    $sel.append('<option value="'+variationName.replace(/"/g,'&quot;')+'" data-price="'+price.toFixed(2)+'" data-stock="'+stock+'" class="'+lowClass+'">'+variationName+' — ₱'+price.toFixed(2)+'</option>');
+                    listHtml += '<span class="badge bg-light text-dark me-1'+lowClass+'">'+variationName+' — ₱'+price.toFixed(2)+' — Qty '+stock+'</span>';
+                    
+                    // Create read-only input fields for price and stock
+                    var $row = $('<div class="col-md-12 mb-2"></div>');
+                    var $label = $('<label class="form-label small">'+variationName+'</label>');
+                    var $inputGroup = $('<div class="row g-2"></div>');
+                    
+                    // Price input (read-only)
+                    var $priceCol = $('<div class="col-md-6"></div>');
+                    var $priceInputGroup = $('<div class="input-group input-group-sm"></div>');
+                    $priceInputGroup.append('<span class="input-group-text">₱</span>');
+                    var $priceInput = $('<input type="number" class="form-control var-price" step="0.01" min="0" placeholder="Price" readonly>');
+                    $priceInput.attr('data-key', variationName);
+                    $priceInput.attr('data-variant', variationName);
+                    $priceInput.val(price > 0 ? price.toFixed(2) : '');
+                    $priceInputGroup.append($priceInput);
+                    $priceCol.append($priceInputGroup);
+                    
+                    // Stock input (read-only)
+                    var $stockCol = $('<div class="col-md-6"></div>');
+                    var $stockInputGroup = $('<div class="input-group input-group-sm"></div>');
+                    $stockInputGroup.append('<span class="input-group-text">Qty</span>');
+                    var $stockInput = $('<input type="number" class="form-control var-stock" min="0" placeholder="Stock" readonly>');
+                    $stockInput.attr('data-key', variationName);
+                    $stockInput.attr('data-variant', variationName);
+                    $stockInput.val(stock > 0 ? stock : '');
+                    $stockInputGroup.append($stockInput);
+                    $stockCol.append($stockInputGroup);
+                    
+                    $inputGroup.append($priceCol);
+                    $inputGroup.append($stockCol);
+                    $row.append($label);
+                    $row.append($inputGroup);
+                    $priceContainer.append($row);
+                });
+                
+                $('#edit-variation-list').html(listHtml || '<span class="text-muted">No variations</span>');
+                var $opt = $sel.find('option').first();
+                var selPrice = $opt.length ? $opt.data('price') : '0.00';
+                var selStock = $opt.length ? $opt.data('stock') : '0';
+                $('#edit-selected-price').text(selPrice);
+                $('#edit-selected-stock').text(selStock);
+                $sel.off('change').on('change', function(){
+                    var $o = $(this).find('option:selected');
+                    $('#edit-selected-price').text(($o.data('price')||'0.00'));
+                    $('#edit-selected-stock').text(($o.data('stock')||'0'));
+                });
+            });
+
+            $('#edit-name, #edit-category').on('input change', function(){
+                var autoUnitType = unitUtils.getAutoUnitType($('#edit-name').val(), $('#edit-category').val());
+                $('#edit-auto-unit-type-hint').text(autoUnitType);
+                var show = $('#edit-track_variations').is(':checked') || unitUtils.isNails($('#edit-name').val(), $('#edit-category').val());
+                $('#edit-variations-container').toggle(show);
+                if (!show) {
+                    $('#edit-variations-container input[type=checkbox]').prop('checked', false);
+                }
+            });
+
+            $('#edit-track_variations').on('change', function(){
+                var show = $(this).is(':checked') || unitUtils.isNails($('#edit-name').val(), $('#edit-category').val());
+                $('#edit-variations-container').toggle(show);
+                if (!show) {
+                    $('#edit-variations-container input[type=checkbox]').prop('checked', false);
+                }
+            });
+
+            $('#editInventoryForm').on('submit', function(e){
+                e.preventDefault();
+                var id = parseInt($('#edit-id').val(), 10) || 0;
+                var name = ($('#edit-name').val() || '').trim();
+                var sku = ($('#edit-sku').val() || '').trim();
+                var category = ($('#edit-category').val() || '').trim();
+                var description = ($('#edit-description').val() || '').trim();
+                var location = ($('#edit-location').val() || '').trim();
+                var reorder = parseInt($('#edit-reorder_threshold').val(), 10);
+                if (!id || !name || !sku || isNaN(reorder) || reorder < 0) {
+                    alert('Please fill out required fields correctly.');
+                    return;
+                }
+                var form = new FormData();
+                form.append('action', 'update_inventory');
+                form.append('ajax', '1');
+                form.append('csrf_token', CSRF_TOKEN);
+                form.append('id', id);
+                form.append('sku', sku);
+                form.append('name', name);
+                form.append('category', category);
+                form.append('description', description);
+                form.append('location', location);
+                form.append('reorder_threshold', reorder);
+                fetch('', { method: 'POST', body: form, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                  .then(r => r.json())
+                  .then(data => {
+                    if (data && data.success) {
+                        try { bootstrap.Modal.getOrCreateInstance(document.getElementById('editInventoryModal')).hide(); } catch(_) {}
+                        try { localStorage.setItem('inventory_last_update', String(Date.now())); } catch(_) {}
+                        location.reload();
+                    } else {
+                        alert(data?.message || 'Update failed.');
+                    }
+                  })
+                  .catch(err => { alert('Network error: ' + err); });
             });
 
             // Delete Item - Enhanced validation
-            $('.delete-btn').click(function() {
-                var itemId = $(this).data('id');
-                var itemName = $(this).data('name') || $(this).attr('data-name') || '';
+            // Restore archived item
+            $(document).on('click', '.restore-btn', function() {
+                const itemId = $(this).data('id');
+                const itemName = $(this).data('name');
                 
-                // Validate that we have required data
-                if (!itemId || itemId <= 0) {
-                    alert('Error: Missing item ID. Please refresh the page and try again.');
-                    return false;
-                }
-                
-                // If name is missing, try to get it from the row or use a default
-                if (!itemName || itemName.trim() === '') {
-                    // Try to get name from the table row
-                    var $row = $(this).closest('tr');
-                    var nameCell = $row.find('td').eq(1).text().trim(); // Second column is usually name
-                    itemName = nameCell || 'Item #' + itemId;
-                    // Update the data attribute for future use
-                    $(this).attr('data-name', itemName);
-                }
-                
-                // Validate that this is a valid inventory page operation
-                if (window.location.pathname.indexOf('inventory.php') === -1) {
-                    alert('Error: This operation is only allowed on the inventory page.');
-                    return false;
-                }
-                
-                // Set the modal data
-                $('#delete-id').val(itemId);
-                $('#delete-name-input').val(itemName); // Hidden input for validation
-                $('#delete-item-name').text(itemName);
-            });
-
-            // Also populate delete modal via Bootstrap event for dynamic rows
-            $('#deleteInventoryModal').on('show.bs.modal', function (event) {
-                var button = $(event.relatedTarget);
-                if (!button || !button.hasClass('delete-btn')) return;
-                var itemId = parseInt(button.data('id') || button.attr('data-id'), 10);
-                var itemName = (button.data('name') || button.attr('data-name') || '').toString().trim();
-                
-                // If name is missing, try to get it from the row
-                if (!itemName || itemName.length === 0) {
-                    var $row = button.closest('tr');
-                    var nameCell = $row.find('td').eq(1).text().trim(); // Second column is usually name
-                    itemName = nameCell || 'Item #' + itemId;
-                }
-                
-                if (!itemId || itemId <= 0) {
-                    alert('Error: Missing item ID. Please refresh the page and try again.');
-                    event.preventDefault();
+                if (!confirm(`Are you sure you want to restore "${itemName}"? It will become active again.`)) {
                     return;
                 }
-                $('#delete-id').val(itemId);
-                $('#delete-name-input').val(itemName);
-                $('#delete-item-name').text(itemName);
+                
+                const form = $('<form method="POST"></form>');
+                form.append($('<input>').attr({type: 'hidden', name: 'action', value: 'restore'}));
+                form.append($('<input>').attr({type: 'hidden', name: 'id', value: itemId}));
+                form.append($('<input>').attr({type: 'hidden', name: 'name', value: itemName}));
+                form.append($('<input>').attr({type: 'hidden', name: 'csrf_token', value: '<?php echo htmlspecialchars($_SESSION['csrf_token']); ?>'}));
+                
+                $('body').append(form);
+                form.submit();
             });
+            
+            // Delete button functionality removed as per requirements
             
             // Real-time inventory refresh
             function refreshInventoryTable() {
@@ -2705,7 +3345,6 @@ try {
                             
                             // Add new data
                             response.data.forEach(function(item) {
-                                var sourceClass = item.source_type === 'Admin Created' ? 'bg-primary' : 'bg-success';
                                 var rowClass = '';
                                 var unitBadge = '<span class="badge bg-secondary">' + ( (item.unit_type ? (item.unit_type.charAt(0).toUpperCase() + item.unit_type.slice(1)) : 'Per piece').replace(/\b(\w)/g, function(m){return m.toUpperCase();}) ) + '</span>';
                                 var variationsDisplay = '';
@@ -2721,88 +3360,39 @@ try {
                                     Object.keys(item.variation_stocks).forEach(function(k) { allVariations.add(k); });
                                 }
                                 
-                                // Build variations and stocks from completed orders (one entry per order)
-                                var variationsDisplay = '';
-                                var stockDisplay = '';
-                                
-                                if (item.completed_orders && Array.isArray(item.completed_orders) && item.completed_orders.length > 0) {
-                                    item.completed_orders.forEach(function(order) {
-                                        var vName = order.variation || '';
-                                        
-                                        // Parse variation for display
-                                        var displayName = 'No Variation';
-                                        var variationDetail = '';
-                                        
-                                        if (vName) {
-                                            // Parse variation to get detailed breakdown
-                                            var variationParts = [];
-                                            if (vName.indexOf('|') !== -1) {
-                                                var parts = vName.split('|');
-                                                parts.forEach(function(part) {
-                                                    part = part.trim();
-                                                    if (part.indexOf(':') !== -1) {
-                                                        variationParts.push(part);
-                                                    }
-                                                });
-                                                variationDetail = variationParts.join(' | ');
-                                            } else if (vName.indexOf(':') !== -1) {
-                                                variationParts.push(vName);
-                                                variationDetail = vName;
-                                            }
-                                            
-                                            // Format display name (e.g., "Generic - Large - Standard")
-                                            if (vName.indexOf('|') !== -1 || vName.indexOf(':') !== -1) {
-                                                var parts = vName.indexOf('|') !== -1 ? vName.split('|') : [vName];
-                                                var values = [];
-                                                parts.forEach(function(part) {
-                                                    part = part.trim();
-                                                    if (part.indexOf(':') !== -1) {
-                                                        var kv = part.split(':');
-                                                        if (kv.length >= 2) {
-                                                            values.push(kv[1].trim());
-                                                        }
-                                                    } else {
-                                                        values.push(part);
-                                                    }
-                                                });
-                                                displayName = values.join(' - ');
-                                            } else {
-                                                displayName = vName;
+                                if (allVariations.size > 0) {
+                                    var reorder = parseInt(item.reorder_threshold, 10) || 0;
+                                    variationsDisplay = '<select class="form-select form-select-sm variation-select" aria-label="Select variation">';
+                                    Array.from(allVariations).forEach(function(name){
+                                        var price = parseFloat((item.variation_prices && item.variation_prices[name]) || 0);
+                                        // Get stock from variation_stocks map, default to 0 if not found
+                                        var stock = parseInt((item.variation_stocks && item.variation_stocks[name]) || 0, 10);
+                                        var lowClass = stock <= reorder ? ' text-warning' : '';
+                                        var stockClass = stock > 0 ? 'text-success fw-bold' : 'text-danger';
+                                        // Format variation for display (combine values only: "Color:Red|Size:Small" -> "Red Small")
+                                        var displayName = name;
+                                        if (name.indexOf('|') !== -1 || name.indexOf(':') !== -1) {
+                                            var parts = name.split('|');
+                                            var values = [];
+                                            parts.forEach(function(part) {
+                                                var av = part.split(':');
+                                                if (av.length === 2) {
+                                                    values.push(av[1].trim());
+                                                } else {
+                                                    values.push(part.trim());
+                                                }
+                                            });
+                                            displayName = values.join(' ');
+                                        } else if (name.indexOf(':') !== -1) {
+                                            var av = name.split(':');
+                                            if (av.length === 2) {
+                                                displayName = av[1].trim();
                                             }
                                         }
-                                        
-                                        // Build variation display (matching orders.php badge style)
-                                        if (vName) {
-                                            variationsDisplay += '<div class="mb-3">' +
-                                                '<div class="d-flex flex-column">' +
-                                                '<span class="badge bg-info mb-1 fs-6">' +
-                                                '<i class="bi bi-tag-fill me-1"></i>' + displayName.replace(/</g, '&lt;').replace(/>/g, '&gt;') +
-                                                '</span>';
-                                            if (variationDetail) {
-                                                variationsDisplay += '<small class="text-muted">' + variationDetail.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</small>';
-                                            }
-                                            variationsDisplay += '</div></div>';
-                                        } else {
-                                            variationsDisplay += '<div class="mb-3"><span class="badge bg-secondary">No Variation</span></div>';
-                                        }
-                                        
-                                        // Build stock display (matching orders.php badge style)
-                                        var orderQuantity = parseInt(order.quantity || 0, 10);
-                                        
-                                        stockDisplay += '<div class="mb-3">' +
-                                            '<div class="d-flex flex-column align-items-start">' +
-                                            '<span class="badge bg-primary fs-6 mb-1">' +
-                                            '<i class="bi bi-box-seam me-1"></i><strong>' + orderQuantity + '</strong> pcs' +
-                                            '</span>' +
-                                            '<small class="text-muted">Quantity Ordered</small>' +
-                                            '</div>' +
-                                            '</div>';
+                                        variationsDisplay += '<option value="'+name.replace(/\"/g,'&quot;')+'" data-price="'+price.toFixed(2)+'" data-stock="'+stock+'" class="'+lowClass+' '+stockClass+'">'+displayName+' — ₱'+price.toFixed(2)+'</option>';
                                     });
-                                } else {
-                                    variationsDisplay = '<span class="text-muted">—</span>';
-                                    stockDisplay = '<span class="text-muted">—</span>';
+                                    variationsDisplay += '</select>';
                                 }
-                                
                                 var vt = item.unit_type ? item.unit_type : 'per piece';
                                 var row = [
                                     item.sku,
@@ -2811,13 +3401,10 @@ try {
                                     item.reorder_threshold,
                                     unitBadge,
                                     variationsDisplay,
-                                    stockDisplay,
                                     item.supplier_name || '',
                                     item.location,
-                                    '<span class="badge ' + sourceClass + '">' + item.source_type + '</span>',
-                                    '<button type="button" class="btn btn-sm btn-info view-btn" data-id="' + item.id + '" data-sku="' + item.sku + '" data-name="' + item.name + '" data-description="' + (item.description || '') + '" data-reorder="' + item.reorder_threshold + '" data-supplier="' + (item.supplier_id || '') + '" data-category="' + item.category + '" data-location="' + item.location + '" data-source="' + item.source_type + '" data-unit_type="' + vt + '" data-variation_prices="' + vp + '" data-variation_stocks="' + vs + '" data-bs-toggle="modal" data-bs-target="#viewInventoryModal"><i class="bi bi-eye"></i></button> ' +
-                                    '<button type="button" class="btn btn-sm btn-primary edit-btn" data-id="' + item.id + '" data-sku="' + item.sku + '" data-name="' + item.name + '" data-description="' + (item.description || '') + '" data-reorder="' + item.reorder_threshold + '" data-supplier="' + (item.supplier_id || '') + '" data-category="' + item.category + '" data-location="' + item.location + '" data-unit_type="' + vt + '" data-variation_prices="' + vp + '" data-variation_stocks="' + vs + '" data-bs-toggle="modal" data-bs-target="#editInventoryModal"><i class="bi bi-pencil"></i></button> ' +
-                                    '<button type="button" class="btn btn-sm btn-danger delete-btn" data-id="' + item.id + '" data-name="' + (item.name || item.sku || 'Item #' + item.id) + '" data-bs-toggle="modal" data-bs-target="#deleteInventoryModal"><i class="bi bi-trash"></i></button>'
+                                    '<button type="button" class="btn btn-sm btn-info view-btn" data-id="' + item.id + '" data-sku="' + item.sku + '" data-name="' + item.name + '" data-description="' + (item.description || '') + '" data-reorder="' + item.reorder_threshold + '" data-supplier="' + (item.supplier_id || '') + '" data-category="' + item.category + '" data-location="' + item.location + '" data-unit_type="' + vt + '" data-variation_prices="' + vp + '" data-variation_stocks="' + vs + '" data-bs-toggle="modal" data-bs-target="#viewInventoryModal"><i class="bi bi-eye"></i></button> ' +
+                                    '<button type="button" class="btn btn-sm btn-warning edit-btn" data-id="' + item.id + '" data-sku="' + item.sku + '" data-name="' + item.name + '" data-description="' + (item.description || '') + '" data-reorder="' + item.reorder_threshold + '" data-supplier="' + (item.supplier_id || '') + '" data-category="' + item.category + '" data-location="' + item.location + '" data-unit_type="' + vt + '" data-variation_prices="' + vp + '" data-variation_stocks="' + vs + '" data-bs-toggle="modal" data-bs-target="#editInventoryModal"><i class="bi bi-pencil"></i></button>'
                                 ];
                                 var addedRow = table.row.add(row).draw(false);
                                 if (rowClass) {
@@ -2868,16 +3455,9 @@ try {
                     Object.keys(priceMap).forEach(function(name){
                         var price = parseFloat(priceMap[name] || 0);
                         var stock = parseInt((stockMap[name] || 0), 10);
-                        var lowStock = stock <= reorder;
-                        var stockClass = stock > 0 ? (lowStock ? 'bg-warning' : 'bg-success') : 'bg-danger';
-                        var lowClass = lowStock ? ' text-warning' : '';
-                        $sel.append('<option value="'+name.replace(/"/g,'&quot;')+'" data-price="'+price.toFixed(2)+'" data-stock="'+stock+'" class="'+lowClass+'">'+name+' — ₱'+price.toFixed(2)+' (Stock: '+stock+')</option>');
-                        listHtml += '<div class="d-flex justify-content-between align-items-center mb-2 p-2 border rounded">' +
-                                    '<span class="fw-semibold">'+name+'</span>' +
-                                    '<div class="d-flex align-items-center gap-2">' +
-                                    '<span class="text-muted">₱'+price.toFixed(2)+'</span>' +
-                                    '<span class="badge '+stockClass+' text-white">Stock: '+stock+'</span>' +
-                                    '</div></div>';
+                        var lowClass = stock <= reorder ? ' text-warning' : '';
+                        $sel.append('<option value="'+name.replace(/"/g,'&quot;')+'" data-price="'+price.toFixed(2)+'" data-stock="'+stock+'" class="'+lowClass+'">'+name+' — ₱'+price.toFixed(2)+'</option>');
+                        listHtml += '<span class="badge bg-light text-dark me-1'+lowClass+'">'+name+' — ₱'+price.toFixed(2)+' — Qty '+stock+'</span>';
                     });
                     $('#view-variation-list').html(listHtml || '<span class="text-muted">No variations</span>');
                     var $opt = $sel.find('option').first();
@@ -2893,171 +3473,107 @@ try {
                 });
 
                 $('.edit-btn').off('click').on('click', function() {
-                    // Only populate reorder threshold - other fields are preserved
                     $('#edit-id').val($(this).data('id'));
+                    $('#edit-sku').val($(this).data('sku'));
+                    $('#edit-name').val($(this).data('name'));
+                    $('#edit-description').val($(this).data('description'));
                     $('#edit-reorder_threshold').val($(this).data('reorder'));
+                    $('#edit-category').val($(this).data('category'));
+                    // Always disable supplier editing on edit modal
+                    $('#edit-supplier_id')
+                        .val($(this).data('supplier'))
+                        .prop('disabled', true)
+                        .attr('title', 'Supplier cannot be changed on edit.')
+                        .trigger('change');
+                    $('#edit-location').val($(this).data('location'));
+
+                    // Also set unit type and variations like initial binding
+                    var storedUnitType = $(this).data('unit_type');
+                    var autoUnitType = unitUtils.getAutoUnitType($(this).data('name'), $(this).data('category'));
+                    var selectedUnitType = (storedUnitType || autoUnitType || 'per piece').toLowerCase();
+                    $('#edit-unit-type').val(selectedUnitType);
+                    $('#edit-auto-unit-type-hint').text(autoUnitType);
+
+                    // Build edit variation select options
+                    var priceRaw = $(this).attr('data-variation_prices') || '';
+                    var stockRaw = $(this).attr('data-variation_stocks') || '';
+                    var priceMap = {}, stockMap = {};
+                    if (priceRaw) { try { priceMap = JSON.parse(priceRaw.replace(/&quot;/g, '"')); } catch(e){} }
+                    if (stockRaw) { try { stockMap = JSON.parse(stockRaw.replace(/&quot;/g, '"')); } catch(e){} }
+                    var reorder = parseInt($(this).data('reorder'), 10) || 0;
+                    var $sel = $('#edit-variation-select');
+                    $sel.empty();
+                    var listHtml = '';
+                    
+                    // Populate variation price/stock container with editable inputs
+                    var $priceContainer = $('#editVariationPriceContainer');
+                    $priceContainer.empty();
+                    
+                    // Get all variations (from either priceMap or stockMap)
+                    var allVariations = new Set();
+                    Object.keys(priceMap).forEach(function(k) { allVariations.add(k); });
+                    Object.keys(stockMap).forEach(function(k) { allVariations.add(k); });
+                    
+                    allVariations.forEach(function(variationName) {
+                        var price = parseFloat(priceMap[variationName] || 0);
+                        var stock = parseInt((stockMap[variationName] || 0), 10);
+                        var lowClass = stock <= reorder ? ' text-warning' : '';
+                        
+                        // Add to dropdown
+                        $sel.append('<option value="'+variationName.replace(/"/g,'&quot;')+'" data-price="'+price.toFixed(2)+'" data-stock="'+stock+'" class="'+lowClass+'">'+variationName+' — ₱'+price.toFixed(2)+'</option>');
+                        listHtml += '<span class="badge bg-light text-dark me-1'+lowClass+'">'+variationName+' — ₱'+price.toFixed(2)+' — Qty '+stock+'</span>';
+                        
+                        // Create read-only input fields for price and stock
+                        var $row = $('<div class="col-md-12 mb-2"></div>');
+                        var $label = $('<label class="form-label small">'+variationName+'</label>');
+                        var $inputGroup = $('<div class="row g-2"></div>');
+                        
+                        // Price input (read-only)
+                        var $priceCol = $('<div class="col-md-6"></div>');
+                        var $priceInputGroup = $('<div class="input-group input-group-sm"></div>');
+                        $priceInputGroup.append('<span class="input-group-text">₱</span>');
+                        var $priceInput = $('<input type="number" class="form-control var-price" step="0.01" min="0" placeholder="Price" readonly>');
+                        $priceInput.attr('data-key', variationName);
+                        $priceInput.attr('data-variant', variationName);
+                        $priceInput.val(price > 0 ? price.toFixed(2) : '');
+                        $priceInputGroup.append($priceInput);
+                        $priceCol.append($priceInputGroup);
+                        
+                        // Stock input (read-only)
+                        var $stockCol = $('<div class="col-md-6"></div>');
+                        var $stockInputGroup = $('<div class="input-group input-group-sm"></div>');
+                        $stockInputGroup.append('<span class="input-group-text">Qty</span>');
+                        var $stockInput = $('<input type="number" class="form-control var-stock" min="0" placeholder="Stock" readonly>');
+                        $stockInput.attr('data-key', variationName);
+                        $stockInput.attr('data-variant', variationName);
+                        $stockInput.val(stock > 0 ? stock : '');
+                        $stockInputGroup.append($stockInput);
+                        $stockCol.append($stockInputGroup);
+                        
+                        $inputGroup.append($priceCol);
+                        $inputGroup.append($stockCol);
+                        $row.append($label);
+                        $row.append($inputGroup);
+                        $priceContainer.append($row);
+                    });
+                    
+                    $('#edit-variation-list').html(listHtml || '<span class="text-muted">No variations</span>');
+                    var $opt = $sel.find('option').first();
+                    var selPrice = $opt.length ? $opt.data('price') : '0.00';
+                    var selStock = $opt.length ? $opt.data('stock') : '0';
+                    $('#edit-selected-price').text(selPrice);
+                    $('#edit-selected-stock').text(selStock);
+                    $sel.off('change').on('change', function(){
+                        var $o = $(this).find('option:selected');
+                        $('#edit-selected-price').text(($o.data('price')||'0.00'));
+                        $('#edit-selected-stock').text(($o.data('stock')||'0'));
+                    });
                 });
 
-                $('.delete-btn').off('click').on('click', function() {
-                    var itemId = $(this).data('id');
-                    var itemName = $(this).data('name');
-                    $('#delete-id').val(itemId);
-                    $('#delete-name-input').val(itemName);
-                    $('#delete-item-name').text(itemName);
-                });
-                // Ensure modal population works even for newly injected buttons
-                $('#deleteInventoryModal').off('show.bs.modal').on('show.bs.modal', function (event) {
-                    var button = $(event.relatedTarget);
-                    if (!button || !button.hasClass('delete-btn')) return;
-                    var itemId = parseInt(button.data('id'), 10);
-                    var itemName = (button.data('name') || '').toString();
-                    if (!itemId || !itemName.length) return;
-                    $('#delete-id').val(itemId);
-                    $('#delete-name-input').val(itemName);
-                    $('#delete-item-name').text(itemName);
-                });
+                // Delete button functionality removed as per requirements
             }
 
-            // Save Variation Prices & Stock via AJAX
-            $('#save-variation-prices-stock-btn').off('click').on('click', function() {
-                var invId = parseInt($('#edit-id').val(), 10);
-                var $btn = $(this);
-                var $feedback = $('#edit-var-price-feedback');
-                if (!$feedback.length) {
-                    $feedback = $('<div id="edit-var-price-feedback" class="alert mt-2" role="alert" aria-live="polite"></div>');
-                    $('#editInventoryForm').find('.modal-body').append($feedback);
-                }
-                function showFeedback(type, text) {
-                    $feedback.removeClass('d-none alert-success alert-danger alert-warning')
-                             .addClass(type === 'success' ? 'alert-success' : type === 'warning' ? 'alert-warning' : 'alert-danger')
-                             .text(text);
-                }
-                if (!invId) { showFeedback('danger', 'Invalid inventory item.'); return; }
-                var unitType = ($('#edit-unit-type').val() || 'per piece').toString().toLowerCase();
-                // Try new structure first (variation price container), fall back to old
-                var container = $('#editVariationPriceContainer').length ? $('#editVariationPriceContainer') : $('#edit-variations-container');
-                var priceKeys = [], priceVals = [];
-                var stockKeys = [], stockVals = [];
-                var valid = true, err = '';
-
-                // Clear previous validation states
-                container.find('.variation-price, .variation-stock').removeClass('is-invalid').attr('aria-invalid', null);
-
-                // Collect prices and stocks from variation price container (new structure)
-                container.find('.var-price, .variation-price').each(function(){
-                    var $input = $(this);
-                    var key = ($input.data('variant') || $input.data('key') || '').toString();
-                    if (!key) return;
-                    var raw = ($input.val() || '').toString().trim();
-                    if (raw !== '') {
-                        var num = parseFloat(raw);
-                        if (!isNaN(num) && num >= 0) {
-                            priceKeys.push(key);
-                            priceVals.push(Number(num.toFixed(2)));
-                        }
-                    }
-                });
-                
-                // Collect stocks from variation stock inputs
-                container.find('.var-stock, .variation-stock').each(function(){
-                    var $input = $(this);
-                    var key = ($input.data('variant') || $input.data('key') || '').toString();
-                    if (!key) return;
-                    var raw = ($input.val() || '').toString().trim();
-                    if (raw !== '') {
-                        var num = parseInt(raw, 10);
-                        if (!isNaN(num) && num >= 0) {
-                            stockKeys.push(key);
-                            stockVals.push(num);
-                        }
-                    }
-                });
-                
-                // Also check the variation attributes container for selected variations
-                $('#editUnitVariationContainer input[type="checkbox"][name^="variation_attrs["]:checked').each(function(){
-                    var name = $(this).attr('name') || '';
-                    var m = name.match(/^variation_attrs\[(.+)\]\[\]$/);
-                    if (!m) return;
-                    var attr = m[1];
-                    var val = $(this).val();
-                    var key = attr + ':' + val;
-                    // Check if we already have this key
-                    if (priceKeys.indexOf(key) === -1) {
-                        // Try to find price/stock inputs for this variation
-                        var $priceInput = container.find('[data-key="' + key.replace(/"/g, '&quot;') + '"].var-price, [data-variant="' + key.replace(/"/g, '&quot;') + '"].variation-price');
-                        var $stockInput = container.find('[data-key="' + key.replace(/"/g, '&quot;') + '"].var-stock, [data-variant="' + key.replace(/"/g, '&quot;') + '"].variation-stock');
-                        if ($priceInput.length && $priceInput.val()) {
-                            var p = parseFloat($priceInput.val());
-                            if (!isNaN(p) && p >= 0) {
-                                priceKeys.push(key);
-                                priceVals.push(Number(p.toFixed(2)));
-                            }
-                        }
-                        if ($stockInput.length && $stockInput.val()) {
-                            var s = parseInt($stockInput.val(), 10);
-                            if (!isNaN(s) && s >= 0) {
-                                stockKeys.push(key);
-                                stockVals.push(s);
-                            }
-                        }
-                    }
-                });
-
-                if (priceKeys.length === 0 && stockKeys.length === 0) { 
-                    showFeedback('warning', 'Select variations and enter prices or stock to save.'); 
-                    return; 
-                }
-                
-                $btn.prop('disabled', true).text('Saving...');
-                $.ajax({
-                    url: 'ajax/update_variation_prices_stock.php',
-                    type: 'POST',
-                    dataType: 'json',
-                    data: { 
-                        inventory_id: invId, 
-                        unit_type: unitType, 
-                        variation_price_keys: priceKeys, 
-                        variation_price_vals: priceVals,
-                        variation_stock_keys: stockKeys,
-                        variation_stock_vals: stockVals
-                    },
-                    success: function(resp) {
-                        if (resp && resp.success) {
-                            var msg = 'Variation';
-                            if (resp.updated.prices && Object.keys(resp.updated.prices).length > 0) msg += ' prices';
-                            if (resp.updated.stocks && Object.keys(resp.updated.stocks).length > 0) {
-                                if (msg.includes('prices')) msg += ' and';
-                                msg += ' stock';
-                            }
-                            msg += ' updated successfully.';
-                            showFeedback('success', msg);
-                            
-                            // Update the edit modal stock inputs immediately from response
-                            if (resp.updated && resp.updated.stocks) {
-                                Object.keys(resp.updated.stocks).forEach(function(variation) {
-                                    var newStock = resp.updated.stocks[variation];
-                                    var $stockInput = $('#editVariationPriceContainer').find('.var-stock[data-key="' + variation.replace(/"/g, '&quot;') + '"]');
-                                    if ($stockInput.length) {
-                                        $stockInput.val(newStock > 0 ? newStock : '');
-                                    }
-                                });
-                            }
-                            
-                            // Wait a moment for DB commit, then refresh the table to show updated stock numbers in dropdown
-                            setTimeout(function() {
-                                refreshInventoryTable();
-                            }, 500);
-                        } else {
-                            showFeedback('danger', 'Update failed: ' + (resp && resp.error ? resp.error : 'Unknown error'));
-                        }
-                        $btn.prop('disabled', false).text('Save Variation Prices & Stock');
-                    },
-                    error: function() { 
-                        showFeedback('danger', 'Network or server error while updating.'); 
-                        $btn.prop('disabled', false).text('Save Variation Prices & Stock');
-                    }
-                });
-            });
+            // Save Variation Prices & Stock functionality removed as per requirements
 
             // Refresh inventory every 30 seconds
             // Initial refresh to ensure UI reflects latest variants
@@ -3095,5 +3611,3 @@ document.addEventListener('DOMContentLoaded', function(){
 </script>
 </body>
 </html>
-
-

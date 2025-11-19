@@ -14,14 +14,12 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
-// Auth: allow management/admin only
 if (empty($_SESSION['admin']['user_id']) || (($_SESSION['admin']['role'] ?? '') !== 'management')) {
     http_response_code(401);
     echo json_encode(['success' => false, 'message' => 'Unauthorized']);
     exit;
 }
 
-// CSRF token check
 $inputToken = $_POST['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
 if (!isset($_SESSION['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $inputToken)) {
     http_response_code(403);

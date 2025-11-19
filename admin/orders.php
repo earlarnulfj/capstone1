@@ -22,15 +22,6 @@ if (($_SESSION['admin']['role'] ?? null) !== 'management') {
     exit();
 }
 
-// ---- CSRF token setup ----
-if (empty($_SESSION['csrf_token'])) {
-    try {
-        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-    } catch (Throwable $e) {
-        $_SESSION['csrf_token'] = sha1(uniqid('csrf', true));
-    }
-}
-
 // ---- Instantiate dependencies ----
 $db         = (new Database())->getConnection();
 
@@ -299,8 +290,14 @@ if (isset($_SESSION['order_delete_message'])) {
     unset($_SESSION['order_delete_message_type']);
 }
 
+// Debug: Log POST requests
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    error_log("=== ORDERS.PHP POST REQUEST ===");
+    error_log("POST data: " . json_encode($_POST));
+    error_log("Raw input: " . file_get_contents('php://input'));
+    
     if (isset($_POST['action'])) {
+        error_log("Action found: " . $_POST['action']);
         // Add new order
         if ($_POST['action'] === 'add') {
             $order->inventory_id = $_POST['inventory_id'];
@@ -373,7 +370,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         
         // Cancel order
-        else if ($_POST['action'] === 'cancel') {
+        elseif ($_POST['action'] === 'cancel') {
             $order_id = filter_var($_POST['id'], FILTER_VALIDATE_INT);
             $item_name = trim($_POST['item'] ?? '');
             
@@ -477,22 +474,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         
+        
         // Delete order - ONLY affects admin_orders table, NOT orders table (supplier orders)
-        // CRITICAL: This deletion is completely independent from supplier/orders.php
-        // Deleting from admin_orders will NOT affect the orders table that suppliers see
-        // Supplier orders are managed separately in supplier/orders.php
         if (isset($_POST['action']) && $_POST['action'] === 'delete') {
+            error_log("=== DELETE ORDER REQUEST FROM ADMIN ===");
+            error_log("POST data: " . print_r($_POST, true));
+            error_log("Raw POST: " . var_export($_POST, true));
+            error_log("Target table: admin_orders (NOT orders)");
+            
             // Get order ID - try multiple field names
             $order_id = 0;
             if (isset($_POST['id']) && is_numeric($_POST['id'])) {
                 $order_id = (int)$_POST['id'];
+                error_log("Found order ID from 'id' field: $order_id");
             } elseif (isset($_POST['order_id']) && is_numeric($_POST['order_id'])) {
                 $order_id = (int)$_POST['order_id'];
+                error_log("Found order ID from 'order_id' field: $order_id");
+            } else {
+                error_log("ERROR: No valid order ID found in POST data. POST keys: " . implode(', ', array_keys($_POST)));
             }
+            
+            error_log("Attempting to delete order ID: $order_id from admin_orders table");
             
             if ($order_id <= 0) {
                 $message = "Invalid order ID.";
                 $messageType = "danger";
+                error_log("Delete failed: Invalid order ID");
                 $_SESSION['order_delete_message'] = $message;
                 $_SESSION['order_delete_message_type'] = "danger";
                 header("Location: orders.php");
@@ -506,6 +513,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!$orderExists) {
                     $message = "Order #$order_id not found in admin orders.";
                     $messageType = "danger";
+                    error_log("Delete failed: Order $order_id does not exist in admin_orders table");
                     $_SESSION['order_delete_message'] = $message;
                     $_SESSION['order_delete_message_type'] = "danger";
                     header("Location: orders.php");
@@ -528,63 +536,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $variation = !empty($orderDetails['variation']) ? trim($orderDetails['variation']) : null;
                         $order_status = $orderDetails['confirmation_status'] ?? 'pending';
                         
-                        // If order was completed, check if we should delete the inventory item
-                        // CRITICAL: When deleting a completed order, also delete the inventory item
-                        // to ensure it doesn't appear in admin/inventory.php
+                        // If order was completed, reverse stock in inventory_variations
                         if ($order_status === 'completed' && $inventory_id > 0) {
-                            // Check if there are other completed orders for this inventory item
-                            $otherOrdersStmt = $db->prepare("SELECT COUNT(*) as count FROM admin_orders 
-                                                           WHERE inventory_id = ? 
-                                                           AND confirmation_status = 'completed' 
-                                                           AND id != ?");
-                            $otherOrdersStmt->execute([$inventory_id, $order_id]);
-                            $otherOrders = (int)$otherOrdersStmt->fetch(PDO::FETCH_ASSOC)['count'];
-                            
-                            // If this is the only completed order for this inventory item, delete the inventory item
-                            if ($otherOrders === 0) {
-                                // Delete inventory variations first
-                                try {
-                                    $delVarsStmt = $db->prepare("DELETE FROM inventory_variations WHERE inventory_id = ?");
-                                    $delVarsStmt->execute([$inventory_id]);
-                                } catch (Exception $e) {
-                                    error_log("Warning: Could not delete inventory variations: " . $e->getMessage());
-                                }
-                                
-                                // Delete the inventory item itself
-                                try {
-                                    $delInvStmt = $db->prepare("DELETE FROM inventory WHERE id = ?");
-                                    $delInvStmt->execute([$inventory_id]);
-                                    error_log("Deleted inventory item #{$inventory_id} as it was only created from order #{$order_id}");
-                                } catch (Exception $e) {
-                                    error_log("Warning: Could not delete inventory item: " . $e->getMessage());
+                            if ($variation) {
+                                $varCheck = $db->prepare("SELECT id, quantity FROM inventory_variations WHERE inventory_id = ? AND variation = ? LIMIT 1");
+                                $varCheck->execute([$inventory_id, $variation]);
+                                $existingVar = $varCheck->fetch(PDO::FETCH_ASSOC);
+                
+                                if ($existingVar) {
+                                    $newQty = max(0, (int)$existingVar['quantity'] - $order_quantity);
+                                    if ($newQty > 0) {
+                                        $updateVarStmt = $db->prepare("UPDATE inventory_variations SET quantity = ? WHERE id = ?");
+                                        $updateVarStmt->execute([$newQty, (int)$existingVar['id']]);
+                                    } else {
+                                        $deleteVarStmt = $db->prepare("DELETE FROM inventory_variations WHERE id = ?");
+                                        $deleteVarStmt->execute([(int)$existingVar['id']]);
+                }
                                 }
                             } else {
-                                // There are other completed orders, just reverse stock
-                                if ($variation) {
-                                    $varCheck = $db->prepare("SELECT id, quantity FROM inventory_variations WHERE inventory_id = ? AND variation = ? LIMIT 1");
-                                    $varCheck->execute([$inventory_id, $variation]);
-                                    $existingVar = $varCheck->fetch(PDO::FETCH_ASSOC);
-                    
-                                    if ($existingVar) {
-                                        $newQty = max(0, (int)$existingVar['quantity'] - $order_quantity);
-                                        if ($newQty > 0) {
-                                            $updateVarStmt = $db->prepare("UPDATE inventory_variations SET quantity = ? WHERE id = ?");
-                                            $updateVarStmt->execute([$newQty, (int)$existingVar['id']]);
-                                        } else {
-                                            $deleteVarStmt = $db->prepare("DELETE FROM inventory_variations WHERE id = ?");
-                                            $deleteVarStmt->execute([(int)$existingVar['id']]);
-                                        }
-                                    }
-                                } else {
-                                    $invCheck = $db->prepare("SELECT id, quantity FROM inventory WHERE id = ? LIMIT 1");
-                                    $invCheck->execute([$inventory_id]);
-                                    $existingInv = $invCheck->fetch(PDO::FETCH_ASSOC);
-                                    
-                                    if ($existingInv) {
-                                        $newQty = max(0, (int)$existingInv['quantity'] - $order_quantity);
-                                        $updateStmt = $db->prepare("UPDATE inventory SET quantity = ? WHERE id = ?");
-                                        $updateStmt->execute([$newQty, $inventory_id]);
-                                    }
+                                $invCheck = $db->prepare("SELECT id, quantity FROM inventory WHERE id = ? LIMIT 1");
+                                $invCheck->execute([$inventory_id]);
+                                $existingInv = $invCheck->fetch(PDO::FETCH_ASSOC);
+                                
+                                if ($existingInv) {
+                                    $newQty = max(0, (int)$existingInv['quantity'] - $order_quantity);
+                                    $updateStmt = $db->prepare("UPDATE inventory SET quantity = ? WHERE id = ?");
+                                    $updateStmt->execute([$newQty, $inventory_id]);
                                 }
                             }
                         }
@@ -597,10 +574,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             // Ignore
                         }
                         
-                        // DELETE THE ENTIRE ORDER FROM admin_orders TABLE ONLY
-                        // CRITICAL: This deletion is independent - does NOT affect orders table
-                        // Supplier orders in orders table remain untouched
+                        // DELETE THE ENTIRE ORDER FROM admin_orders TABLE
                         // IMPORTANT: This deletes the complete order row, not just the item name
+                        error_log("=== DELETING COMPLETE ORDER $order_id FROM admin_orders TABLE ===");
                         
                         // Verify the order exists before deletion
                         $beforeDeleteCheck = $db->prepare("SELECT id, inventory_id, quantity, item_name FROM admin_orders o LEFT JOIN inventory i ON o.inventory_id = i.id WHERE o.id = ? LIMIT 1");
@@ -609,6 +585,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         if (!$orderBefore) {
                             throw new Exception("Order #$order_id does not exist in admin_orders table.");
                         }
+                        error_log("Order $order_id found. Will delete complete row: " . json_encode($orderBefore));
                         
                         // DELETE THE ENTIRE ORDER ROW - This removes ALL fields, not just item_name
                         // Use direct DELETE query to ensure the complete order is removed
@@ -616,8 +593,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $deleteResult = $deleteStmt->execute([$order_id]);
                         $rowsDeleted = $deleteStmt->rowCount();
                         
+                        error_log("=== DELETE QUERY EXECUTED ===");
+                        error_log("Order ID: $order_id");
+                        error_log("Query result: " . ($deleteResult ? 'SUCCESS' : 'FAILED'));
+                        error_log("Rows deleted: $rowsDeleted");
+                        
                         if (!$deleteResult) {
                             $errorInfo = $deleteStmt->errorInfo();
+                            error_log("DELETE query error: " . json_encode($errorInfo));
                             throw new Exception("DELETE query execution failed for order #$order_id. Error: " . ($errorInfo[2] ?? 'Unknown error'));
                         }
                         
@@ -741,17 +724,86 @@ try {
                 $upd->execute([$newStatus, $orderId, $newStatus]);
                 
                 // Only proceed with completion logic if status changed to 'completed'
-                // IMPORTANT: Once status becomes 'completed', sync to inventory_from_completed_orders table
-                // This ensures the product appears in inventory.php immediately
+                // IMPORTANT: Once status becomes 'completed', the item automatically appears in admin_pos.php and pos.php
+                // The POS queries filter by confirmation_status = 'completed', so items are immediately available for sale
                 if ($newStatus === 'completed' && $statusBefore !== 'completed') {
-                    // Sync completed order to the new inventory_from_completed_orders table
-                    require_once __DIR__ . '/../models/inventory.php';
-                    $inventory = new Inventory($db);
-                    $inventory->syncCompletedOrderToInventory($orderId, 'admin_orders');
+                    // Get order details for inventory update (only when completing)
+                    $orderDetails = $db->prepare("SELECT inventory_id, quantity, variation, unit_type, unit_price FROM admin_orders WHERE id = ?");
+                $orderDetails->execute([$orderId]);
+                $orderData = $orderDetails->fetch(PDO::FETCH_ASSOC);
+                
+                // Update inventory variation stocks when order is marked as completed
+                    // This ensures stock is available in POS immediately after completion
+                if ($orderData && $orderData['inventory_id']) {
+                    require_once __DIR__ . '/../models/inventory_variation.php';
                     
-                    // Log completion with inventory sync
+                    $invVariation = new InventoryVariation($db);
+                    
+                    $inventory_id = (int)$orderData['inventory_id'];
+                        $qty = (int)$orderData['quantity'];
+                    $variation = !empty($orderData['variation']) ? trim($orderData['variation']) : null;
+                    $unit_type = !empty($orderData['unit_type']) ? trim($orderData['unit_type']) : 'per piece';
+                    $unit_price = isset($orderData['unit_price']) && $orderData['unit_price'] > 0 ? (float)$orderData['unit_price'] : null;
+                    
+                    $stockToAdd = $qty;
+                    
+                    if ($variation) {
+                        $varCheck = $db->prepare("SELECT id, quantity FROM inventory_variations WHERE inventory_id = :inv_id AND variation = :var LIMIT 1");
+                        $varCheck->execute([
+                            ':inv_id' => $inventory_id,
+                            ':var' => $variation
+                        ]);
+                        $existingVar = $varCheck->fetch(PDO::FETCH_ASSOC);
+                        
+                        if ($existingVar) {
+                            $updateVarStmt = $db->prepare("UPDATE inventory_variations SET quantity = quantity + :qty WHERE id = :id");
+                            $updateVarStmt->execute([
+                                ':qty' => $stockToAdd,
+                                ':id' => (int)$existingVar['id']
+                            ]);
+                            
+                            if ($unit_price !== null) {
+                                $updatePriceStmt = $db->prepare("UPDATE inventory_variations SET unit_price = :price WHERE id = :id");
+                                $updatePriceStmt->execute([
+                                    ':price' => $unit_price,
+                                    ':id' => (int)$existingVar['id']
+                                ]);
+                            }
+                        } else {
+                            $invCheck = $db->prepare("SELECT id FROM inventory WHERE id = :id LIMIT 1");
+                            $invCheck->execute([':id' => $inventory_id]);
+                            if ($invCheck->fetch()) {
+                                $varCheck2 = $db->prepare("SELECT id FROM inventory_variations WHERE inventory_id = :inv_id AND variation = :var LIMIT 1");
+                                $varCheck2->execute([
+                                    ':inv_id' => $inventory_id,
+                                    ':var' => $variation
+                                ]);
+                                $existingVar2 = $varCheck2->fetch(PDO::FETCH_ASSOC);
+                                
+                                if (!$existingVar2) {
+                                    $invVariation->createVariant($inventory_id, $variation, $unit_type, $stockToAdd, $unit_price);
+                                } else {
+                                    $updateVarStmt = $db->prepare("UPDATE inventory_variations SET quantity = quantity + :qty WHERE id = :id");
+                                    $updateVarStmt->execute([
+                                        ':qty' => $stockToAdd,
+                                        ':id' => (int)$existingVar2['id']
+                                    ]);
+                                }
+                            }
+                        }
+                    } else {
+                        $invCheck = $db->prepare("SELECT id FROM inventory WHERE id = :id LIMIT 1");
+                        $invCheck->execute([':id' => $inventory_id]);
+                        if ($invCheck->fetch()) {
+                            $updateStmt = $db->prepare("UPDATE inventory SET quantity = quantity + :qty WHERE id = :id");
+                            $updateStmt->execute([':qty' => $stockToAdd, ':id' => $inventory_id]);
+                        }
+                        }
+                    }
+                    
+                    // Log completion with inventory update
                     $log = $db->prepare("INSERT INTO sync_events (event_type, source_system, target_system, order_id, delivery_id, status_before, status_after, success, message, created_at) VALUES (?,?,?,?,?,?,?,?,?,NOW())");
-                    $log->execute(['order_status_sync','admin_ui','admin_system',$orderId,null,$statusBefore,'completed',1,'Order auto-completed based on delivery status: synced to inventory_from_completed_orders']);
+                    $log->execute(['order_status_sync','admin_ui','admin_system',$orderId,null,$statusBefore,'completed',1,'Order auto-completed based on delivery status: all deliveries completed and inventory stocks updated']);
                 } else {
                     // Log status change (non-completion changes)
                     $log = $db->prepare("INSERT INTO sync_events (event_type, source_system, target_system, order_id, delivery_id, status_before, status_after, success, message, created_at) VALUES (?,?,?,?,?,?,?,?,?,NOW())");
@@ -877,37 +929,17 @@ if (isset($_GET['deleted']) && is_numeric($_GET['deleted'])) {
 
 // Get all orders - fresh query to ensure deleted orders don't show
 $stmt = $order->readAll();
-
-// Group orders by inventory_id (product) to avoid duplicates
-// Same product with different variations will be shown in one row
-$ordersByProduct = [];
-while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-    $inventory_id = isset($row['inventory_id']) ? (int)$row['inventory_id'] : 0;
-    $item_name = $row['item_name'] ?? 'Unknown Product';
-    
-    // Use inventory_id as key, or item_name if inventory_id is 0
-    $key = $inventory_id > 0 ? $inventory_id : 'name_' . md5($item_name);
-    
-    if (!isset($ordersByProduct[$key])) {
-        $ordersByProduct[$key] = [
-            'inventory_id' => $inventory_id,
-            'item_name' => $item_name,
-            'unit_type' => $row['unit_type'] ?? 'N/A',
-            'supplier_name' => $row['supplier_name'] ?? 'N/A',
-            'orders' => []
-        ];
-    }
-    
-    // Add this order to the product's order list
-    $ordersByProduct[$key]['orders'][] = $row;
-}
+$adminOrderCount = 0;
+$ordersCount = 0;
+try { $adminOrderCount = (int)$db->query("SELECT COUNT(*) FROM admin_orders")->fetchColumn(); } catch (Throwable $e) { $adminOrderCount = 0; error_log('Orders page count error: ' . $e->getMessage()); }
+try { $ordersCount = (int)$db->query("SELECT COUNT(*) FROM orders")->fetchColumn(); } catch (Throwable $e) { $ordersCount = 0; }
+if ($adminOrderCount === 0 && $ordersCount > 0) { $message = 'Admin orders list is empty while supplier orders exist.'; $messageType = 'warning'; error_log('Diagnostic: admin_orders empty, orders count=' . $ordersCount); }
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="csrf-token" content="<?php echo htmlspecialchars($_SESSION['csrf_token']); ?>">
     <title>Orders Management - Inventory & Stock Control System</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
@@ -937,15 +969,19 @@ while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
                 <?php endif; ?>
                 
                 <div class="card mb-4">
-                    <div class="card-header">
-                        <i class="bi bi-table me-1"></i>
-                        Orders
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <div>
+                            <i class="bi bi-table me-1"></i>
+                            Orders
+                        </div>
+                        <div></div>
                     </div>
                     <div class="card-body">
                         <div class="table-responsive">
                             <table id="ordersTable" class="table table-striped table-hover">
                                 <thead>
                                     <tr>
+                                        
                                         <th>Order #</th>
                                         <th>Item</th>
                                         <th>Per Unit</th>
@@ -960,205 +996,181 @@ while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <?php foreach ($ordersByProduct as $productKey => $productData): 
-                                        $orders = $productData['orders'];
-                                        $inventory_id = $productData['inventory_id'];
-                                        $item_name = $productData['item_name'];
-                                        $firstOrder = $orders[0]; // Use first order for common fields
-                                        
-                                        // Get all variations for this inventory item
-                                        $available_variations = [];
-                                        if ($inventory_id > 0 && isset($variationDataMap[$inventory_id])) {
-                                            $available_variations = $variationDataMap[$inventory_id];
-                                        }
-                                        
-                                    ?>
-                                    <tr data-inventory-id="<?php echo $inventory_id; ?>" data-product-key="<?php echo htmlspecialchars($productKey); ?>">
-                                             <td>
-                                                 <?php foreach ($orders as $orderRow): ?>
-                                                     <div class="mb-2">
-                                                         <span class="badge bg-secondary">#<?php echo $orderRow['id']; ?></span>
-                                                     </div>
-                                                 <?php endforeach; ?>
-                                             </td>
-                                             <td><?php echo htmlspecialchars($item_name); ?></td>
-                                             <td><?php echo htmlspecialchars($productData['unit_type']); ?></td>
+                                    <?php if ($adminOrderCount === 0): ?>
+                                        <tr>
+                                            <td colspan="11" class="text-center text-muted">No admin orders found.</td>
+                                        </tr>
+                                    <?php endif; ?>
+                                    <?php while ($row = $stmt->fetch(PDO::FETCH_ASSOC)): ?>
+                                    <tr data-order-id="<?php echo $row['id']; ?>">
+                                             <td><?php echo $row['id']; ?></td>
+                                             <td><?php echo $row['item_name']; ?></td>
+                                             <td><?php echo htmlspecialchars($row['unit_type'] ?? 'N/A'); ?></td>
                                              <td>
                                                 <?php 
-                                                // Show all variations for all orders (old design style - badges)
-                                                $hasVariations = false;
-                                                foreach ($orders as $orderRow): 
-                                                    $ordered_variation = isset($orderRow['variation']) ? trim($orderRow['variation']) : '';
-                                                    if (!empty($ordered_variation)) {
-                                                        $hasVariations = true;
-                                                    }
+                                                // Get the ordered variation (what was selected in supplier_details.php)
+                                                $ordered_variation = isset($row['variation']) ? trim($row['variation']) : '';
+                                                $inventory_id = isset($row['inventory_id']) ? (int)$row['inventory_id'] : 0;
+                                                
+                                                // Get all variations for this inventory item
+                                                $available_variations = [];
+                                                if ($inventory_id > 0 && isset($variationDataMap[$inventory_id])) {
+                                                    $available_variations = $variationDataMap[$inventory_id];
+                                                }
                                                 ?>
-                                                    <div class="mb-3">
-                                                        <?php if (!empty($ordered_variation)): ?>
-                                                            <div class="d-flex flex-column">
-                                                                <span class="badge bg-info mb-1 fs-6">
-                                                                    <i class="bi bi-tag-fill me-1"></i><?= htmlspecialchars(formatVariationForDisplay($ordered_variation)) ?>
-                                                                </span>
-                                                                <small class="text-muted"><?= htmlspecialchars(formatVariationWithLabels($ordered_variation)) ?></small>
-                                                            </div>
-                                                        <?php else: ?>
-                                                            <span class="badge bg-secondary">No Variation</span>
-                                                        <?php endif; ?>
-                                                    </div>
-                                                <?php endforeach; ?>
-                                             </td>
-                                             <td>
-                                                <?php 
-                                                // Show all quantities for all orders (old design style - badges)
-                                                foreach ($orders as $orderRow): 
-                                                    $order_qty = (int)($orderRow['quantity'] ?? 0);
-                                                ?>
-                                                    <div class="mb-3">
-                                                        <div class="d-flex flex-column align-items-start">
-                                                            <span class="badge bg-primary fs-6 mb-1">
-                                                                <i class="bi bi-box-seam me-1"></i><strong><?= $order_qty ?></strong> pcs
-                                                            </span>
-                                                            <small class="text-muted">Quantity Ordered</small>
+                                                <?php if (!empty($available_variations)): ?>
+                                                    <div class="variation-dropdown-container" data-order-id="<?php echo $row['id']; ?>">
+                                                        <select class="form-select form-select-sm variation-combination-select" 
+                                                                data-order-id="<?php echo $row['id']; ?>"
+                                                                data-inventory-id="<?php echo $inventory_id; ?>"
+                                                                aria-label="Select variation combination">
+                                                            <?php 
+                                                            // Filter to only show complete combinations and sort them
+                                                            $completeVariations = array_filter($available_variations, function($var) {
+                                                                $varKey = $var['variation'] ?? '';
+                                                                // Only include complete combinations (contain '|') or single values without ':'
+                                                                return !empty($varKey) && (strpos($varKey, '|') !== false || (strpos($varKey, ':') === false && trim($varKey) !== ''));
+                                                            });
+                                                            // Sort by formatted display name
+                                                            usort($completeVariations, function($a, $b) {
+                                                                $aFormatted = formatVariationForDisplay($a['variation'] ?? '');
+                                                                $bFormatted = formatVariationForDisplay($b['variation'] ?? '');
+                                                                return strcmp($aFormatted, $bFormatted);
+                                                            });
+                                                            ?>
+                                                            <?php foreach ($completeVariations as $var): 
+                                                                $varKey = $var['variation'];
+                                                                $varPrice = isset($var['unit_price']) ? (float)$var['unit_price'] : 0;
+                                                                $varStock = isset($var['quantity']) ? (int)$var['quantity'] : 0;
+                                                                // Display as single line: "Adidas - Large - Red"
+                                                                $varDisplay = formatVariationForDisplay($varKey);
+                                                                $isSelected = ($ordered_variation === $varKey) ? 'selected' : '';
+                                                            ?>
+                                                                <option value="<?= htmlspecialchars($varKey) ?>" 
+                                                                        data-price="<?= $varPrice ?>" 
+                                                                        data-stock="<?= $varStock ?>"
+                                                                        <?= $isSelected ?>>
+                                                                    <?= htmlspecialchars($varDisplay) ?>
+                                                                </option>
+                                                            <?php endforeach; ?>
+                                                        </select>
+                                                        <div class="variation-info mt-1" data-order-id="<?php echo $row['id']; ?>">
+                                                            <?php if (!empty($ordered_variation)): 
+                                                                // Find the ordered variation details
+                                                                $ordered_var_data = null;
+                                                                foreach ($available_variations as $var) {
+                                                                    if ($var['variation'] === $ordered_variation) {
+                                                                        $ordered_var_data = $var;
+                                                                        break;
+                                                                    }
+                                                                }
+                                                                if ($ordered_var_data):
+                                                                    $display_price = isset($ordered_var_data['unit_price']) ? (float)$ordered_var_data['unit_price'] : 0;
+                                                                    $display_stock = isset($ordered_var_data['quantity']) ? (int)$ordered_var_data['quantity'] : 0;
+                                                            ?>
+                                                                <div class="d-flex flex-wrap gap-1 align-items-center">
+                                                                    <small class="text-muted"><strong>Price:</strong> ₱<?= number_format($display_price, 2) ?></small>
+                                                                    <small class="text-muted">|</small>
+                                                                    <small class="text-muted"><strong>Stock:</strong> <?= $display_stock ?> pcs</small>
+                                                                </div>
+                                                            <?php endif; ?>
+                                                            <?php endif; ?>
                                                         </div>
                                                     </div>
-                                                <?php endforeach; ?>
+                                                <?php elseif (!empty($ordered_variation)): ?>
+                                                    <div class="d-flex flex-column">
+                                                        <span class="badge bg-info mb-1 fs-6">
+                                                            <i class="bi bi-tag-fill me-1"></i><?= htmlspecialchars(formatVariationForDisplay($ordered_variation)) ?>
+                                                        </span>
+                                                        <small class="text-muted"><?= htmlspecialchars(formatVariationWithLabels($ordered_variation)) ?></small>
+                                                    </div>
+                                                <?php else: ?>
+                                                    <span class="badge bg-secondary">No Variation</span>
+                                                <?php endif; ?>
                                              </td>
-                                             <td><?php echo htmlspecialchars($productData['supplier_name']); ?></td>
                                              <td>
-                                                 <?php foreach ($orders as $orderRow): 
-                                                     $order_unit_price = isset($orderRow['unit_price']) && $orderRow['unit_price'] > 0 ? (float)$orderRow['unit_price'] : 0;
-                                                     $total_price = $order_unit_price * ($orderRow['quantity'] ?? 0);
+                                                <?php 
+                                                $order_qty = (int)($row['quantity'] ?? 0);
+                                                ?>
+                                                <div class="d-flex flex-column align-items-start">
+                                                    <span class="badge bg-primary fs-6 mb-1">
+                                                        <i class="bi bi-box-seam me-1"></i><strong><?= $order_qty ?></strong> pcs
+                                                    </span>
+                                                    <small class="text-muted">Quantity Ordered</small>
+                                                </div>
+                                             </td>
+                                             <td><?php echo $row['supplier_name']; ?></td>
+                                             <td>
+                                                 <div class="d-flex flex-column">
+                                                     <?php 
+                                                     // Calculate total price from order unit_price and quantity
+                                                     $order_unit_price = isset($row['unit_price']) && $row['unit_price'] > 0 ? (float)$row['unit_price'] : 0;
+                                                     $total_price = $order_unit_price * ($row['quantity'] ?? 0);
                                                      $unit_price_display = number_format($order_unit_price, 2);
-                                                     $quantity_display = $orderRow['quantity'] ?? 0;
-                                                 ?>
-                                                     <div class="mb-3">
-                                                         <strong class="text-success fs-5 mb-1">₱<?= number_format($total_price, 2) ?></strong>
-                                                         <div class="d-flex flex-wrap gap-1 align-items-center">
-                                                             <small class="text-muted">Unit: ₱<?= $unit_price_display ?></small>
-                                                             <small class="text-muted">×</small>
-                                                             <small class="text-muted">Qty: <?= $quantity_display ?></small>
-                                                         </div>
+                                                     $quantity_display = $row['quantity'] ?? 0;
+                                                     ?>
+                                                     <strong class="text-success fs-5 mb-1">₱<span class="item-total"><?= number_format($total_price, 2) ?></span></strong>
+                                                     <div class="d-flex flex-wrap gap-1 align-items-center">
+                                                         <small class="text-muted">Unit: ₱<?= $unit_price_display ?></small>
+                                                         <small class="text-muted">×</small>
+                                                         <small class="text-muted">Qty: <?= $quantity_display ?></small>
                                                      </div>
-                                                 <?php endforeach; ?>
+                                                 </div>
                                              </td>
                                              <td>
-                                                 <?php 
-                                                 // Check if all orders have the same status
-                                                 $allStatuses = array_unique(array_column($orders, 'confirmation_status'));
-                                                 $singleStatus = count($allStatuses) === 1 ? $allStatuses[0] : null;
-                                                 
-                                                 if ($singleStatus): 
-                                                     // Show single badge if all have same status
-                                                     if ($singleStatus == 'pending'): ?>
-                                                         <span class="badge bg-warning">Pending</span>
-                                                     <?php elseif ($singleStatus == 'confirmed'): ?>
-                                                         <span class="badge bg-success">Confirmed</span>
-                                                     <?php elseif ($singleStatus == 'delivered'): ?>
-                                                         <span class="badge bg-primary">Delivered</span>
-                                                     <?php elseif ($singleStatus == 'completed'): ?>
-                                                         <span class="badge bg-info">Completed</span>
-                                                     <?php else: ?>
-                                                         <span class="badge bg-danger">Cancelled</span>
-                                                     <?php endif; ?>
-                                                 <?php else: 
-                                                     // Show all statuses if different
-                                                     foreach ($orders as $orderRow): ?>
-                                                         <div class="mb-2">
-                                                             <?php if ($orderRow['confirmation_status'] == 'pending'): ?>
-                                                                 <span class="badge bg-warning">Pending</span>
-                                                             <?php elseif ($orderRow['confirmation_status'] == 'confirmed'): ?>
-                                                                 <span class="badge bg-success">Confirmed</span>
-                                                             <?php elseif ($orderRow['confirmation_status'] == 'delivered'): ?>
-                                                                 <span class="badge bg-primary">Delivered</span>
-                                                             <?php elseif ($orderRow['confirmation_status'] == 'completed'): ?>
-                                                                 <span class="badge bg-info">Completed</span>
-                                                             <?php else: ?>
-                                                                 <span class="badge bg-danger">Cancelled</span>
-                                                             <?php endif; ?>
-                                                         </div>
-                                                     <?php endforeach; ?>
+                                                 <?php if ($row['confirmation_status'] == 'pending'): ?>
+                                                     <span class="badge bg-warning">Pending</span>
+                                                 <?php elseif ($row['confirmation_status'] == 'confirmed'): ?>
+                                                     <span class="badge bg-success">Confirmed</span>
+                                                 <?php elseif ($row['confirmation_status'] == 'delivered'): ?>
+                                                     <span class="badge bg-primary">Delivered</span>
+                                                 <?php elseif ($row['confirmation_status'] == 'completed'): ?>
+                                                     <span class="badge bg-info">Completed</span>
+                                                 <?php else: ?>
+                                                     <span class="badge bg-danger">Cancelled</span>
                                                  <?php endif; ?>
                                              </td>
                                              <td>
-                                                 <?php 
-                                                 // Check if all orders have the same created by
-                                                 $allCreators = [];
-                                                 foreach ($orders as $orderRow) {
-                                                     if ($orderRow['is_automated']) {
-                                                         $allCreators[] = 'Automated';
-                                                     } else {
-                                                         $allCreators[] = $orderRow['username'] ?? 'N/A';
-                                                     }
-                                                 }
-                                                 $uniqueCreators = array_unique($allCreators);
-                                                 $singleCreator = count($uniqueCreators) === 1 ? reset($uniqueCreators) : null;
-                                                 
-                                                 if ($singleCreator): 
-                                                     // Show single creator if all are the same
-                                                     if ($singleCreator == 'Automated'): ?>
-                                                         <span class="badge bg-info">Automated</span>
-                                                     <?php else: ?>
-                                                         <?php echo htmlspecialchars($singleCreator); ?>
-                                                     <?php endif; ?>
-                                                 <?php else: 
-                                                     // Show all creators if different
-                                                     foreach ($orders as $orderRow): ?>
-                                                         <div class="mb-2">
-                                                             <?php if ($orderRow['is_automated']): ?>
-                                                                 <span class="badge bg-info">Automated</span>
-                                                             <?php else: ?>
-                                                                 <?php echo htmlspecialchars($orderRow['username'] ?? 'N/A'); ?>
-                                                             <?php endif; ?>
-                                                         </div>
-                                                     <?php endforeach; ?>
+                                                 <?php if ($row['is_automated']): ?>
+                                                     <span class="badge bg-info">Automated</span>
+                                                 <?php else: ?>
+                                                     <?php echo $row['username']; ?>
                                                  <?php endif; ?>
                                              </td>
+                                             <td><?php echo date('M d, Y', strtotime($row['order_date'])); ?></td>
                                              <td>
-                                                 <?php foreach ($orders as $orderRow): ?>
-                                                     <div class="mb-2">
-                                                         <?php echo date('M d, Y', strtotime($orderRow['order_date'])); ?>
-                                                     </div>
-                                                 <?php endforeach; ?>
-                                             </td>
-                                             <td>
-                                                 <?php foreach ($orders as $orderRow): ?>
-                                                     <div class="mb-2 d-inline-block">
-                                                         <button type="button" class="btn btn-sm btn-info view-btn" 
-                                                             data-id="<?php echo $orderRow['id']; ?>"
-                                                             data-inventory-id="<?php echo $orderRow['inventory_id']; ?>"
-                                                             data-item="<?php echo htmlspecialchars($orderRow['item_name']); ?>"
-                                                             data-unit="<?php echo htmlspecialchars($orderRow['unit_type'] ?? ''); ?>"
-                                                             data-variation="<?php echo htmlspecialchars($orderRow['variation'] ?? ''); ?>"
-                                                             data-supplier="<?php echo htmlspecialchars($orderRow['supplier_name'] ?? ''); ?>"
-                                                             data-quantity="<?php echo $orderRow['quantity']; ?>"
-                                                             data-status="<?php echo $orderRow['confirmation_status']; ?>"
-                                                             data-automated="<?php echo $orderRow['is_automated']; ?>"
-                                                             data-username="<?php echo htmlspecialchars($orderRow['username'] ?? ''); ?>"
-                                                             data-date="<?php echo date('M d, Y', strtotime($orderRow['order_date'])); ?>"
-                                                             data-bs-toggle="modal" data-bs-target="#viewOrderModal"
-                                                             title="View Order #<?php echo $orderRow['id']; ?>">
-                                                             <i class="bi bi-eye"></i>
-                                                         </button>
-                                                         <?php if ($orderRow['confirmation_status'] !== 'cancelled' && $orderRow['confirmation_status'] !== 'completed'): ?>
-                                                         <button type="button" class="btn btn-sm btn-warning cancel-btn"
-                                                             data-id="<?php echo $orderRow['id']; ?>"
-                                                             data-item="<?php echo htmlspecialchars($orderRow['item_name']); ?>"
-                                                             data-bs-toggle="modal" data-bs-target="#cancelOrderModal"
-                                                             title="Cancel Order #<?php echo $orderRow['id']; ?>">
-                                                             <i class="bi bi-x-circle"></i>
-                                                         </button>
-                                                         <?php endif; ?>
-                                                         <button type="button" class="btn btn-sm btn-danger delete-btn"
-                                                             data-id="<?php echo $orderRow['id']; ?>"
-                                                             data-item="<?php echo htmlspecialchars(!empty($orderRow['item_name']) ? $orderRow['item_name'] : 'Order #' . $orderRow['id'], ENT_QUOTES, 'UTF-8'); ?>"
-                                                             title="Delete Order #<?php echo $orderRow['id']; ?>">
-                                                             <i class="bi bi-trash"></i>
-                                                         </button>
-                                                     </div>
-                                                 <?php endforeach; ?>
+                                                 <button type="button" class="btn btn-sm btn-info view-btn" 
+                                                     data-id="<?php echo $row['id']; ?>"
+                                                     data-inventory-id="<?php echo $row['inventory_id']; ?>"
+                                                     data-item="<?php echo $row['item_name']; ?>"
+                                                     data-unit="<?php echo $row['unit_type']; ?>"
+                                                     data-variation="<?php echo htmlspecialchars($row['variation'] ?? ''); ?>"
+                                                     data-supplier="<?php echo $row['supplier_name']; ?>"
+                                                     data-quantity="<?php echo $row['quantity']; ?>"
+                                                     data-status="<?php echo $row['confirmation_status']; ?>"
+                                                     data-automated="<?php echo $row['is_automated']; ?>"
+                                                     data-username="<?php echo $row['username']; ?>"
+                                                     data-date="<?php echo date('M d, Y', strtotime($row['order_date'])); ?>"
+                                                     data-bs-toggle="modal" data-bs-target="#viewOrderModal">
+                                                     <i class="bi bi-eye"></i>
+                                                 </button>
+                                                 <?php if ($row['confirmation_status'] !== 'cancelled' && $row['confirmation_status'] !== 'completed'): ?>
+                                                 <button type="button" class="btn btn-sm btn-warning cancel-btn"
+                                                     data-id="<?php echo $row['id']; ?>"
+                                                     data-item="<?php echo $row['item_name']; ?>"
+                                                     data-bs-toggle="modal" data-bs-target="#cancelOrderModal"
+                                                     title="Cancel Order">
+                                                     <i class="bi bi-x-circle"></i>
+                                                 </button>
+                                                 <?php endif; ?>
+                                                 <button type="button" class="btn btn-sm btn-danger delete-btn"
+                                                     data-id="<?php echo $row['id']; ?>"
+                                                     data-item="<?php echo htmlspecialchars(!empty($row['item_name']) ? $row['item_name'] : 'Order #' . $row['id'], ENT_QUOTES, 'UTF-8'); ?>">
+                                                     <i class="bi bi-trash"></i>
+                                                 </button>
                                              </td>
                                          </tr>
-                                     <?php endforeach; ?>
+                                     <?php endwhile; ?>
                                  </tbody>
                                  <!-- Grand Total removed as requested -->
                              </table>
@@ -1268,7 +1280,6 @@ while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
          </div>
      </div>
      
-     
      <!-- Cancel Order Modal -->
      <div class="modal fade" id="cancelOrderModal" tabindex="-1" aria-labelledby="cancelOrderModalLabel" aria-hidden="true">
          <div class="modal-dialog">
@@ -1304,20 +1315,14 @@ while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
      <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
      <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
      <script src="https://cdn.datatables.net/1.11.5/js/jquery.dataTables.min.js"></script>
-     <script src="https://cdn.datatables.net/1.11.5/js/dataTables.bootstrap5.min.js"></script>
-     <script>
-         $(document).ready(function() {
+    <script src="https://cdn.datatables.net/1.11.5/js/dataTables.bootstrap5.min.js"></script>
+    <script>
+        $(document).ready(function() {
             // Initialize DataTable
-            var table = $('#ordersTable').DataTable({
-                columnDefs: [
-                    { orderable: false, targets: 0 } // Disable sorting on checkbox column
-                ],
-                 responsive: true,
-                 order: [[1, 'desc']] // Order by Order # column (index 1)
-             });
-             
-             // Store table reference globally for bulk delete
-             window.ordersDataTable = table;
+           $('#ordersTable').DataTable({
+                responsive: true,
+                order: [[0, 'desc']]
+            });
              
              // Clean URL after delete redirect (page already reloaded from server)
              const urlParams = new URLSearchParams(window.location.search);
@@ -1483,6 +1488,8 @@ while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
                  console.log('Cancel operation initiated for order ID:', orderId, 'Item:', itemName);
              });
 
+            
+             
              // Delete Order - Handle button click to populate modal
              $(document).on('click', '.delete-btn', function(e) {
                  e.preventDefault();
@@ -1512,13 +1519,16 @@ while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
                  
                  // Fallback: Extract from table row if data attributes still not found
                  if ((!itemName || itemName === '' || itemName === null || itemName === undefined) && row.length) {
-                     // Item name is in the second column (index 1, after order #)
-                     const itemNameCell = row.find('td').eq(1);
+                     // Item name is in the third column (index 2, after checkbox and order #)
+                    const itemNameCell = row.find('td').eq(1);
                      if (itemNameCell.length) {
                          itemName = itemNameCell.text().trim();
                          console.log('Item name from table cell:', itemName);
                      }
                  }
+                 
+                 // Another fallback: Get from checkbox in the same row (it also has data-item)
+                
                  
                  // Clean up extracted values
                  if (orderId) {
@@ -1549,11 +1559,23 @@ while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
                  }
                  
                  if (!itemName || itemName === '' || itemName === null || itemName === undefined) {
+                     console.error('❌ Missing Item Name');
+                     console.error('Attempted extractions:', {
+                         'from-attr': button.attr('data-item'),
+                         'from-data': button.data('item'),
+                         'from-table-cell': row.find('td').eq(2).text().trim(),
+                         'from-checkbox': ''
+                     });
+                     console.error('Button element:', button[0]);
+                     console.error('Row element:', row[0]);
+                     
                      // Try one more time - get directly from DOM attribute
                      const rawItemAttr = button[0].getAttribute('data-item');
+                     console.error('Raw DOM attribute:', rawItemAttr);
                      
                      if (rawItemAttr && rawItemAttr.trim() !== '') {
                          itemName = rawItemAttr.trim();
+                         console.log('✅ Got item name from raw DOM attribute:', itemName);
                      } else {
                          // Last resort: Try to decode HTML entities if present
                          const tempDiv = document.createElement('div');
@@ -1562,9 +1584,11 @@ while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
                          const decoded = tempDiv.textContent || tempDiv.innerText || '';
                          if (decoded && decoded.trim() !== '') {
                              itemName = decoded.trim();
+                             console.log('✅ Got item name after HTML decode:', itemName);
                          } else {
                              // Final fallback: Use "Order #ID" if item name truly not available
                              itemName = 'Order #' + orderIdNum;
+                             console.log('⚠️ Using fallback item name:', itemName);
                          }
                      }
                  }
@@ -1574,6 +1598,12 @@ while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
                  $('#delete-item-name').text(itemName);
                  $('#delete-item-input').val(itemName);
                  $('#confirmDeleteBtn').prop('disabled', false).html('Delete');
+                 
+                 console.log('Modal fields populated:', {
+                     'delete-id': $('#delete-id').val(),
+                     'delete-item-name': $('#delete-item-name').text(),
+                     'delete-item-input': $('#delete-item-input').val()
+                 });
                  
                  // Show the modal using Bootstrap 5 API
                  const deleteModalElement = document.getElementById('deleteOrderModal');
@@ -1673,6 +1703,9 @@ while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
                                      if (table) {
                                          table.row($row).remove().draw(false);
                                      }
+                                     
+                                     // Update bulk delete button state
+                                     updateBulkDeleteOrdersButton();
                                      
                                      // Show notification if needed
                                      if (typeof showNotification === 'function') {
@@ -1851,8 +1884,35 @@ while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
 
              // Calculate initial grand total
              calculateGrandTotal();
-         });
-     </script>
+        });
+    </script>
+    <script>
+      (function(){
+        function refreshAlertBadge(){
+          $.ajax({
+            url: 'ajax/get_alert_counts.php',
+            method: 'GET',
+            dataType: 'json'
+          }).done(function(r){
+            var c = parseInt((r && (r.active_stock_alerts||r.total_alerts||0)) ,10) || 0;
+            var $b = $('#sidebarAlertBadge');
+            if(c>0){
+              if($b.length===0){
+                $('a[href="alerts.php"]').append('<span class="badge bg-danger ms-1" id="sidebarAlertBadge">'+c+'</span>');
+              } else {
+                $b.text(c).show();
+              }
+            } else if($b.length){
+              $b.hide();
+            }
+          });
+        }
+        setInterval(refreshAlertBadge,30000);
+        $(document).on('click','.confirm-delivery-btn, .complete-delivery-btn, .cancel-btn, #proceedToSupplierBtn',function(){
+          setTimeout(refreshAlertBadge,500);
+        });
+      })();
+    </script>
      
      <!-- Notification System -->
      <script src="https://kit.fontawesome.com/a076d05399.js" crossorigin="anonymous"></script>
