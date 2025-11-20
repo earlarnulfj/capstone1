@@ -3,6 +3,7 @@
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
+include_once 'config/session.php';
 session_start();
 include_once 'config/database.php';
 include_once 'models/user.php';
@@ -68,6 +69,7 @@ if (isset($_GET['google_auth']) && isset($_SESSION['google_register_data'])) {
 
 // Process registration form
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    ensureCsrf();
     $first_name = trim($_POST['first_name'] ?? '');
     $middle_name = trim($_POST['middle_name'] ?? '');
     $last_name = trim($_POST['last_name'] ?? '');
@@ -141,6 +143,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     }
+}
+
+if (empty($_SESSION['csrf_token'])) {
+    try { $_SESSION['csrf_token'] = bin2hex(random_bytes(32)); } catch (Throwable $e) { $_SESSION['csrf_token'] = sha1(uniqid('csrf', true)); }
 }
 ?>
 <!DOCTYPE html>

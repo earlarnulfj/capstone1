@@ -1,5 +1,8 @@
 <?php
+include_once '../config/session.php';
 session_start();
+requireSupplierPage();
+if ($_SERVER['REQUEST_METHOD'] === 'POST') { ensureCsrf(); }
 require_once '../config/database.php';
 require_once '../models/order.php';
 require_once '../models/inventory_variation.php';

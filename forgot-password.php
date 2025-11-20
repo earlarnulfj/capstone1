@@ -1,4 +1,5 @@
 <?php
+include_once 'config/session.php';
 session_start();
 include_once 'config/database.php';
 include_once 'models/user.php';
@@ -171,6 +172,7 @@ $code_sent = false;
 
 // Process forgot password form
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    ensureCsrf();
     $email = $_POST['email'] ?? '';
     
     if (empty($email)) {
@@ -206,6 +208,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // No code was generated; keep code_sent false
         }
     }
+}
+
+if (empty($_SESSION['csrf_token'])) {
+    try { $_SESSION['csrf_token'] = bin2hex(random_bytes(32)); } catch (Throwable $e) { $_SESSION['csrf_token'] = sha1(uniqid('csrf', true)); }
 }
 ?>
 <!DOCTYPE html>
@@ -251,6 +257,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             </p>
                             
                             <form method="POST" action="<?php echo APP_BASE; ?>/forgot-password.php" id="forgotPasswordForm">
+                                <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['csrf_token']); ?>">
                                 <div class="mb-3">
                                     <label for="email" class="form-label">
                                         <i class="bi bi-envelope me-2"></i>Email Address

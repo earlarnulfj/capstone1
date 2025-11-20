@@ -189,3 +189,32 @@ function requireManagementAuth(): void {
         exit();
     }
 }
+
+function requireManagementPage(): void {
+    if (empty($_SESSION['admin']['user_id']) || (($_SESSION['admin']['role'] ?? null) !== 'management')) {
+        header('Location: ../login.php');
+        exit();
+    }
+}
+
+function requireStaffPage(): void {
+    if (empty($_SESSION['staff']['user_id'])) {
+        header('Location: ../login.php');
+        exit();
+    }
+}
+
+function requireSupplierPage(): void {
+    $ok = false;
+    if (!empty($_SESSION['supplier']['user_id'])) { $ok = true; }
+    elseif (!empty($_SESSION['user_id']) && (($_SESSION['role'] ?? '') === 'supplier')) { $ok = true; }
+    if (!$ok) { header('Location: ../login.php'); exit(); }
+}
+
+function ensureCsrf(): void {
+    $t = $_POST['csrf_token'] ?? ($_SERVER['HTTP_X_CSRF_TOKEN'] ?? '');
+    if (empty($_SESSION['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $t)) {
+        http_response_code(403);
+        exit();
+    }
+}

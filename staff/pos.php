@@ -61,41 +61,13 @@ $invVariation = new InventoryVariation($db);
 // Interest markup for selling inventory products (10% markup)
 $interestMarkup = 0.10;
 
-// Format variation for display (same as orders.php)
-function formatVariationForDisplay($variation) {
-    if (empty($variation)) return '';
-    if (strpos($variation, '|') === false && strpos($variation, ':') === false) return $variation;
-    
-    $parts = explode('|', $variation);
-    $values = [];
-    foreach ($parts as $part) {
-        $av = explode(':', trim($part), 2);
-        if (count($av) === 2) {
-            $values[] = trim($av[1]);
-        } else {
-            $values[] = trim($part);
-        }
-    }
-    return implode(' - ', $values);
+if (empty($_SESSION['csrf_token'])) {
+    try { $_SESSION['csrf_token'] = bin2hex(random_bytes(32)); } catch (Throwable $e) { $_SESSION['csrf_token'] = sha1(uniqid('csrf', true)); }
 }
 
-// Format variation with labels (same as orders.php)
-function formatVariationWithLabels($variation) {
-    if (empty($variation)) return '';
-    if (strpos($variation, '|') === false && strpos($variation, ':') === false) return $variation;
-    
-    $parts = explode('|', $variation);
-    $formatted = [];
-    foreach ($parts as $part) {
-        $av = explode(':', trim($part), 2);
-        if (count($av) === 2) {
-            $formatted[] = trim($av[0]) . ': ' . trim($av[1]);
-        } else {
-            $formatted[] = trim($part);
-        }
-    }
-    return implode(' | ', $formatted);
-}
+function formatVariationForDisplay($variation) { return InventoryVariation::formatVariationForDisplay($variation, ' - '); }
+
+function formatVariationWithLabels($variation) { return InventoryVariation::formatVariationForDisplay($variation, ' | '); }
 
 // Handle AJAX sale processing
 if (
@@ -103,15 +75,23 @@ if (
     && isset($_POST['action'])
     && $_POST['action'] === 'process_sale'
 ) {
+    header('Content-Type: application/json');
+    require_once '../config/session.php';
+    ensureCsrf();
     $items        = json_decode($_POST['cart_items'], true);
+    if (!is_array($items)) {
+        echo json_encode(['success'=>false,'message'=>'Invalid cart data']);
+        exit;
+    }
     $total_amount = 0;
     $db->beginTransaction();
     try {
         foreach ($items as $item) {
-            $inventory_id = $item['id'];
-            $quantity     = $item['quantity'];
-            $unit_type    = isset($item['unit_type']) ? $item['unit_type'] : 'per piece';
-            $variation    = isset($item['variation']) ? $item['variation'] : '';
+            $inventory_id = (int)($item['id'] ?? 0);
+            $quantity     = (int)($item['quantity'] ?? 0);
+            $unit_type    = isset($item['unit_type']) ? (string)$item['unit_type'] : 'per piece';
+            $variation    = isset($item['variation']) ? (string)$item['variation'] : '';
+            if ($inventory_id <= 0 || $quantity <= 0) { throw new Exception('Invalid item payload'); }
 
             // Load inventory
             $inventory->id = $inventory_id;
@@ -120,7 +100,8 @@ if (
             }
 
             // Compute price from completed orders
-            $price = (float)$item['price']; // Price already includes markup from frontend
+            $price = isset($item['price']) ? (float)$item['price'] : 0.0;
+            if ($price <= 0) { throw new Exception('Invalid price'); }
             $item_total   = $quantity * $price;
             $total_amount += $item_total;
 
@@ -1038,7 +1019,8 @@ usort($categories, fn($a,$b) => strcasecmp($a['label'],$b['label']));
   <!-- Checkout Modal -->
   <div class="modal fade" id="checkoutModal" tabindex="-1">
     <div class="modal-dialog">
-      <form id="checkoutForm" class="modal-content">
+  <form id="checkoutForm" class="modal-content">
+    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($_SESSION['csrf_token']); ?>">
         <input type="hidden" name="action" value="process_sale">
         <input type="hidden" name="ajax" value="1">
         <input type="hidden" name="cart_items" id="cartItemsInput">
