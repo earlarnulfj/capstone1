@@ -3,23 +3,20 @@
 include_once '../config/session.php';
 require_once '../config/database.php';
 
-// ---- Admin auth guard ----
-if (empty($_SESSION['admin']['user_id'])) {
-    http_response_code(403);
-    echo json_encode(['success' => false, 'message' => 'Unauthorized access']);
-    exit();
-}
-
-if (($_SESSION['admin']['role'] ?? null) !== 'management') {
-    http_response_code(403);
-    echo json_encode(['success' => false, 'message' => 'Insufficient permissions']);
-    exit();
-}
+requireManagementAuth();
 
 header('Content-Type: application/json');
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     echo json_encode(['success' => false, 'message' => 'Invalid request method']);
+    exit();
+}
+
+// CSRF check
+$t = $_POST['csrf_token'] ?? ($_SERVER['HTTP_X_CSRF_TOKEN'] ?? '');
+if (empty($_SESSION['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $t)) {
+    http_response_code(403);
+    echo json_encode(['success' => false, 'message' => 'Invalid CSRF token']);
     exit();
 }
 

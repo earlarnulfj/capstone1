@@ -33,14 +33,7 @@ require_once '../models/alert_log.php';
 require_once '../models/stock_calculator.php';
 
 // ---- Admin auth guard (namespaced) ----
-if (empty($_SESSION['admin']['user_id'])) {
-    header("Location: ../login.php");
-    exit();
-}
-if (($_SESSION['admin']['role'] ?? null) !== 'management') {
-    header("Location: ../login.php");
-    exit();
-}
+requireManagementPage();
 
 // ---- CSRF token setup ----
 if (empty($_SESSION['csrf_token'])) {
@@ -50,6 +43,8 @@ if (empty($_SESSION['csrf_token'])) {
         $_SESSION['csrf_token'] = sha1(uniqid('csrf', true));
     }
 }
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') { ensureCsrf(); }
 
 // ---- Instantiate dependencies ----
 try {

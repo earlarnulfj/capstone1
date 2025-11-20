@@ -30,6 +30,10 @@ header('Content-Type: text/html; charset=utf-8');
 <?php
 
 include_once '../config/database.php';
+if (!in_array($_SERVER['REMOTE_ADDR'] ?? '', ['127.0.0.1','::1']) && !preg_match('/localhost/i', $_SERVER['HTTP_HOST'] ?? '')) {
+    http_response_code(403);
+    exit('Forbidden');
+}
 
 try {
     $database = new Database();

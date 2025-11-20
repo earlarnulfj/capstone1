@@ -9,35 +9,11 @@ require_once '../models/inventory.php';
 require_once '../models/alert_log.php';
 require_once '../models/inventory_variation.php';
 
-// ---- Staff auth guard ----
-if (empty($_SESSION['staff']['user_id'])) {
-    header("Location: login.php");
-    exit();
-}
-
-if (($_SESSION['staff']['role'] ?? null) !== 'staff') {
-    header("Location: login.php");
-    exit();
-}
+requireStaffPage();
 
 // ====== Helper function for variation display ======
 // Format variation for display: "Color:Red|Size:Small" -> "Red Small" (combine values only)
-function formatVariationForDisplay($variation) {
-    if (empty($variation)) return '';
-    if (strpos($variation, '|') === false && strpos($variation, ':') === false) return $variation;
-    
-    $parts = explode('|', $variation);
-    $values = [];
-    foreach ($parts as $part) {
-        $av = explode(':', trim($part), 2);
-        if (count($av) === 2) {
-            $values[] = trim($av[1]);
-        } else {
-            $values[] = trim($part);
-        }
-    }
-    return implode(' ', $values);
-}
+function formatVariationForDisplay($variation) { return InventoryVariation::formatVariationForDisplay($variation, ' '); }
 
 // ---- Create dependencies ----
 $database = new Database();

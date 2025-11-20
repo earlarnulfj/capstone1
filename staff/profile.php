@@ -6,15 +6,7 @@ require_once '../config/database.php';
 // Load the model class used by this page
 require_once '../models/user.php';
 
-// ---- Staff auth guard (namespaced) ----
-if (empty($_SESSION['staff']['user_id'])) {
-    header("Location: ../login.php");
-    exit();
-}
-if (($_SESSION['staff']['role'] ?? null) !== 'staff') {
-    header("Location: ../login.php");
-    exit();
-}
+requireStaffPage();
 
 // ---- Create dependencies ----
 $db   = (new Database())->getConnection();
@@ -43,6 +35,7 @@ if ($user->readOne($user_id)) {
 
 // Process form submission for updating user data (POS can change only their own info)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'update') {
+    ensureCsrf();
     // Collect form data
     $newUsername = trim($_POST['username'] ?? $username ?? '');
     $newEmail    = trim($_POST['email']    ?? $email    ?? '');

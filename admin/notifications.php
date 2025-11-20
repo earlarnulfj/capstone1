@@ -4,15 +4,7 @@ include_once '../config/session.php';
 require_once '../config/database.php';
 require_once '../models/notification.php';
 
-// ---- Admin auth guard (namespaced) ----
-if (empty($_SESSION['admin']['user_id'])) {
-    header("Location: ../login.php");
-    exit();
-}
-if (($_SESSION['admin']['role'] ?? null) !== 'management') {
-    header("Location: ../login.php");
-    exit();
-}
+requireManagementPage();
 
 // ---- Instantiate dependencies ----
 $db = (new Database())->getConnection();
@@ -28,6 +20,7 @@ $message = '';
 $messageType = 'success';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    ensureCsrf();
     $action = $_POST['action'] ?? '';
     
     switch ($action) {

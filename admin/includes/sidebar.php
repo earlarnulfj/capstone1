@@ -8,23 +8,30 @@ $isAdmin = (($_SESSION['admin']['role'] ?? null) === 'management');
 include_once '../config/database.php';
 include_once '../models/alert_log.php';
 include_once '../models/notification.php';
-$database = new Database();
-$db       = $database->getConnection();
-$alert    = new AlertLog($db);
-$notification = new Notification($db);
+try {
+    $database = new Database();
+    $db       = $database->getConnection();
+    $alert    = new AlertLog($db);
+    $notification = new Notification($db);
+} catch (Throwable $e) {
+    $db = null; $alert = null; $notification = null;
+}
 
 // Use Active Stock Alerts count if available (from alerts.php), otherwise fallback to unresolved alerts
 // Note: active_stock_alerts_count is set in alerts.php and represents the count from Active Stock Alerts
 if (isset($_SESSION['active_stock_alerts_count'])) {
     $unresolvedCount = (int)$_SESSION['active_stock_alerts_count'];
 } else {
-    $unresolvedCount = $alert->getUnresolvedAlerts()->rowCount();
+    $unresolvedCount = 0;
+    if ($alert) {
+        try { $unresolvedCount = $alert->getUnresolvedAlerts()->rowCount(); } catch (Throwable $e) { $unresolvedCount = 0; }
+    }
 }
 
 // Get unread notification count for admin users
 $unreadNotificationCount = 0;
-if ($isAdmin && isset($_SESSION['admin']['user_id'])) {
-    $unreadNotificationCount = $notification->getUnreadCount('management', 1);
+if ($isAdmin && isset($_SESSION['admin']['user_id']) && $notification) {
+    try { $unreadNotificationCount = $notification->getUnreadCount('management', 1); } catch (Throwable $e) { $unreadNotificationCount = 0; }
 }
 
 // For active state using current file name

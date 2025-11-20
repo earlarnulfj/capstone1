@@ -13,14 +13,7 @@ require_once '../models/inventory_variation.php';
 // If your dashboard uses more models, include them here with require_once
 
 // ---- Admin auth guard (namespaced) ----
-if (empty($_SESSION['admin']['user_id'])) {
-    header("Location: ../login.php");
-    exit();
-}
-if (($_SESSION['admin']['role'] ?? null) !== 'management') {
-    header("Location: ../login.php");
-    exit();
-}
+requireManagementPage();
 
 // ---- Instantiate dependencies ----
 $db         = (new Database())->getConnection();
@@ -81,22 +74,7 @@ $alert      = new AlertLog($db);
 
 // ====== Helper function for variation display ======
 // Format variation for display: "Brand:Adidas|Size:Large|Color:Red" -> "Adidas - Large - Red" (combine values with dashes)
-function formatVariationForDisplay($variation) {
-    if (empty($variation)) return '';
-    if (strpos($variation, '|') === false && strpos($variation, ':') === false) return $variation;
-    
-    $parts = explode('|', $variation);
-    $values = [];
-    foreach ($parts as $part) {
-        $av = explode(':', trim($part), 2);
-        if (count($av) === 2) {
-            $values[] = trim($av[1]);
-        } else {
-            $values[] = trim($part);
-        }
-    }
-    return implode(' - ', $values);
-}
+function formatVariationForDisplay($variation) { return InventoryVariation::formatVariationForDisplay($variation, ' - '); }
 
 // Format variation with labels: "Brand:Generic|Size:Large" -> "Brand: Generic | Size: Large"
 function formatVariationWithLabels($variation) {

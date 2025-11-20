@@ -6,34 +6,11 @@ require_once '../models/order.php';
 require_once '../models/delivery.php';
 require_once '../models/payment.php';
 
-// ---- Admin auth guard (namespaced) ----
-if (empty($_SESSION['admin']['user_id'])) {
-    header("Location: ../login.php");
-    exit();
-}
-if (($_SESSION['admin']['role'] ?? null) !== 'management') {
-    header("Location: ../login.php");
-    exit();
-}
+requireManagementPage();
 
 // ====== Helper function for variation display ======
 // Format variation for display: "Color:Red|Size:Small" -> "Red Small" (combine values only)
-function formatVariationForDisplay($variation) {
-    if (empty($variation)) return '';
-    if (strpos($variation, '|') === false && strpos($variation, ':') === false) return $variation;
-    
-    $parts = explode('|', $variation);
-    $values = [];
-    foreach ($parts as $part) {
-        $av = explode(':', trim($part), 2);
-        if (count($av) === 2) {
-            $values[] = trim($av[1]);
-        } else {
-            $values[] = trim($part);
-        }
-    }
-    return implode(' ', $values);
-}
+function formatVariationForDisplay($variation) { return InventoryVariation::formatVariationForDisplay($variation, ' '); }
 
 $database = new Database();
 $db = $database->getConnection();

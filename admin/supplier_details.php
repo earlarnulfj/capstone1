@@ -19,14 +19,7 @@ require_once '../models/inventory_variation.php';
 require_once '../models/stock_calculator.php';
 
 // ---- Admin auth guard (namespaced) ----
-if (empty($_SESSION['admin']['user_id'])) {
-    header("Location: ../login.php");
-    exit();
-}
-if (($_SESSION['admin']['role'] ?? null) !== 'management') {
-    header("Location: ../login.php");
-    exit();
-}
+requireManagementPage();
 $adminId = (int)($_SESSION['admin']['user_id'] ?? 0);
 
 // ---- Instantiate dependencies ----

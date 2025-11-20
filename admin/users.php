@@ -127,14 +127,7 @@ if (($_GET['ajax'] ?? '') === 'admin_logs') {
 }
 
 // ---- Admin auth guard (namespaced) ----
-if (empty($_SESSION['admin']['user_id'])) {
-    header("Location: ../login.php");
-    exit();
-}
-if (($_SESSION['admin']['role'] ?? null) !== 'management') {
-    header("Location: ../login.php");
-    exit();
-}
+requireManagementPage();
 
 // ---- Create dependencies ----
 $db   = (new Database())->getConnection();

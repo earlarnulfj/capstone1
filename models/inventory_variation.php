@@ -198,6 +198,19 @@ class InventoryVariation {
         return $stmt->rowCount() > 0;
     }
 
+    public static function formatVariationForDisplay($variation, $separator = ' ') {
+        if (empty($variation)) return '';
+        if (strpos($variation, '|') === false && strpos($variation, ':') === false) return (string)$variation;
+        $parts = explode('|', (string)$variation);
+        $values = [];
+        foreach ($parts as $part) {
+            $av = explode(':', trim($part), 2);
+            if (count($av) === 2) { $values[] = trim($av[1]); }
+            else { $values[] = trim($part); }
+        }
+        return implode($separator, $values);
+    }
+
     // Update stock to an absolute value
     public function updateStock($inventory_id, $variation, $unit_type, $newQty) {
         if (!$this->tableExists()) {

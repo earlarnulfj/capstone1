@@ -12,34 +12,11 @@ require_once '../models/alert_log.php';
 require_once '../models/inventory_variation.php';
 // If your dashboard uses more models, include them here with require_once
 
-// ---- Admin auth guard (namespaced) ----
-if (empty($_SESSION['admin']['user_id'])) {
-    header("Location: ../login.php");
-    exit();
-}
-if (($_SESSION['admin']['role'] ?? null) !== 'management') {
-    header("Location: ../login.php");
-    exit();
-}
+requireManagementPage();
 
 // ====== Helper function for variation display ======
 // Format variation for display: "Color:Red|Size:Small" -> "Red Small" (combine values only)
-function formatVariationForDisplay($variation) {
-    if (empty($variation)) return '';
-    if (strpos($variation, '|') === false && strpos($variation, ':') === false) return $variation;
-    
-    $parts = explode('|', $variation);
-    $values = [];
-    foreach ($parts as $part) {
-        $av = explode(':', trim($part), 2);
-        if (count($av) === 2) {
-            $values[] = trim($av[1]);
-        } else {
-            $values[] = trim($part);
-        }
-    }
-    return implode(' ', $values);
-}
+function formatVariationForDisplay($variation) { return InventoryVariation::formatVariationForDisplay($variation, ' '); }
 
 // ---- Instantiate dependencies ----
 $db         = (new Database())->getConnection();

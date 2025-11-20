@@ -12,14 +12,7 @@ require_once '../models/alert_log.php';
 require_once '../models/inventory_variation.php';
 
 // ---- Admin auth guard ----
-if (empty($_SESSION['admin']['user_id'])) {
-    header("Location: ../login.php");
-    exit();
-}
-if (($_SESSION['admin']['role'] ?? null) !== 'management') {
-    header("Location: ../login.php");
-    exit();
-}
+requireManagementPage();
 
 // ---- Instantiate dependencies ----
 $db         = (new Database())->getConnection();
@@ -34,22 +27,7 @@ $invVariation = new InventoryVariation($db);
 $interestMarkup = 0.10;
 
 // Format variation for display (same as orders.php)
-function formatVariationForDisplay($variation) {
-    if (empty($variation)) return '';
-    if (strpos($variation, '|') === false && strpos($variation, ':') === false) return $variation;
-    
-    $parts = explode('|', $variation);
-    $values = [];
-    foreach ($parts as $part) {
-        $av = explode(':', trim($part), 2);
-        if (count($av) === 2) {
-            $values[] = trim($av[1]);
-        } else {
-            $values[] = trim($part);
-        }
-    }
-    return implode(' - ', $values);
-}
+function formatVariationForDisplay($variation) { return InventoryVariation::formatVariationForDisplay($variation, ' - '); }
 
 // Truncate product name for receipt display
 function truncateProductName($name, $maxLength = 25) {

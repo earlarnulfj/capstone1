@@ -7,14 +7,7 @@ require_once '../config/database.php';
 require_once '../models/user.php';
 
 // ---- Admin auth guard (namespaced) ----
-if (empty($_SESSION['admin']['user_id'])) {
-    header("Location: ../login.php");
-    exit();
-}
-if (($_SESSION['admin']['role'] ?? null) !== 'management') {
-    header("Location: ../login.php");
-    exit();
-}
+requireManagementPage();
 
 // ---- Create dependencies ----
 $db   = (new Database())->getConnection();
@@ -43,6 +36,7 @@ if ($user->readOne($user_id)) {
 
 // Process form submission for updating user data
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'update') {
+    ensureCsrf();
     // Collect form data
     $newUsername = trim($_POST['username'] ?? $username ?? '');
     $newEmail    = trim($_POST['email']    ?? $email    ?? '');
